@@ -492,6 +492,20 @@ Each service is a separate Git repository:
 - **Container**: Docker
 - **Orchestration**: Kubernetes
 
+## Architectural Decisions
+
+Key architectural decisions are documented as **Architecture Decision Records (ADRs)** in the `docs/adr/` directory.
+
+### Active ADRs
+
+- [ADR-001: Use Redis Distributed Locking for Balance Consistency](docs/adr/001-distributed-locking-for-balance-consistency.md) ✅
+  - **Decision**: Use Redis distributed locks to prevent overdrafts and ensure balance consistency
+  - **Target**: >1000 TPS system-wide, ~20-50 TPS per user
+  - **Trade-off**: Strong consistency over eventual consistency
+  - **Future path**: Can migrate to Kafka partitioning if higher throughput needed
+
+See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
+
 ## Next Steps
 
 1. Define detailed API contracts (OpenAPI/Swagger)
