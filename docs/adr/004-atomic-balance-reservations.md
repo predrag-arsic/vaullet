@@ -57,6 +57,7 @@ Two secondary problems in ADR-001, noted for completeness:
 - >1000 TPS system-wide, sub-200ms p95 approval latency
 - One tenant per deployment (see ADR-005) — isolation is at the cluster boundary, so balances are scoped by `account_id` alone
 - The ledger must express non-cash money (bonus, loyalty, referral) with distinct withdrawal rules, while remaining correct when no rewards module is deployed
+- One currency per deployment, supplied by the operator as configuration
 - Prefer proven, operationally simple mechanisms
 
 ## Decision
@@ -74,6 +75,50 @@ A single `posted_balance` scalar cannot express "the account holds $100, but $60
 Buckets are per *grant*, not per type: a user can hold three separate `BONUS` buckets with different wagering requirements and expiry dates, because that is what the terms of three separate promotions actually mean.
 
 **The ledger is authoritative about amounts and dumb about policy.** It stores `wagering_remaining` but never decides how a wager contributes to it — that is the Bonus module's rule, applied by emitting events. This keeps promotional logic out of the service that must stay correct when Bonus isn't deployed.
+
+### Currency
+
+**Currency is a deployment constant, chosen and supplied by the operator.** Each cluster runs one
+currency, configured alongside module enablement in that customer's Helm values (ADR-005). It is
+therefore *not* a column on every ledger row.
+
+This is a deliberate trade. The alternative — a `currency` column everywhere — buys flexibility no
+contract currently asks for, and costs a correctness hazard on every query that forgets to filter by
+it. A constant cannot be forgotten.
+
+Three things follow, and all three are required:
+
+**1. The journal must be self-describing.** A ledger export reading `amount: 100.0000` with no
+currency anywhere is ambiguous forever, and financial records outlive the cluster that wrote them.
+One immutable row records it:
+
+```sql
+CREATE TABLE ledger_config (
+    singleton     BOOLEAN     PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+    currency      CHAR(3)     NOT NULL,          -- ISO 4217
+    minor_units   SMALLINT    NOT NULL,          -- 2 for EUR, 0 for JPY, 3 for KWD
+    initialized_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Written once at provisioning; never updated. Changing a live deployment's currency is not a config
+change, it is a migration, and the schema should refuse to pretend otherwise.
+
+**2. The boundary must assert it.** Every API accepting an amount takes an explicit currency and
+rejects any mismatch with `422 CURRENCY_MISMATCH`. Never coerce, never default. An operator
+integration bug that posts RSD to a EUR deployment must fail on the first request, not book silently
+at a 1:1 rate and surface months later in a reconciliation.
+
+**3. Rounding is currency-specific.** `NUMERIC(20,4)` holds four decimal places, but a currency with
+`minor_units = 0` (JPY, KRW) must never expose a fractional balance, and one with 3 (KWD, BHD)
+rounds differently from EUR. Rounding policy reads `minor_units` from `ledger_config`; it is not
+hardcoded to 2.
+
+**If an operator ever needs multiple currencies**, the extension is one account per
+`(user, currency)` — never mixed buckets inside one account. Bucket allocation, the `CHECK`
+constraint, and the single-row lock all assume one unit of account; mixing currencies under one
+`account_id` breaks all three simultaneously. Recording this now so the shape isn't rediscovered
+under pressure later.
 
 ### Schema (vaullet_db)
 
@@ -186,11 +231,11 @@ Read and write are in the same transaction, on the same rows, in the same servic
 
 `UNIQUE (idempotency_key)` — keyed on `transaction_id`. A retried reserve (client timeout, Transaction Service restart) hits the constraint and returns the *existing* reservation rather than placing a second hold. This is not optional: without it, retries double-hold and reject legitimate transactions.
 
-Grants use `UNIQUE (grant_id)` on `balance_buckets` for the same reason — a redelivered `ValueGranted` event must not mint money twice. At-least-once delivery makes this mandatory, not defensive.
+Grants use `UNIQUE (grant_id)` on `balance_buckets` for the same reason — a redelivered `rewards.value-granted` event must not mint money twice. At-least-once delivery makes this mandatory, not defensive.
 
 ### Grants (asynchronous)
 
-Bonus, Loyalty, and Referral each emit a common `ValueGranted` event (shared contract, per ADR-002). Vaullet consumes it and, in one transaction: insert a `balance_buckets` row, insert a `CREDIT` ledger entry, increment `account_balances.posted_balance`.
+Bonus, Loyalty, and Referral each emit a common `rewards.value-granted` event (shared contract, per ADR-002). Vaullet consumes it and, in one transaction: insert a `balance_buckets` row, insert a `CREDIT` ledger entry, increment `account_balances.posted_balance`.
 
 Grants are event-driven, not synchronous, which is what keeps all three modules independently removable — the rule from ADR-005 that optional functionality lives on the event side. Vaullet consuming an event type that no deployed module emits costs nothing.
 
@@ -210,7 +255,7 @@ UPDATE reservations SET state = 'EXPIRED'
  RETURNING reservation_id;   -- then release allocations, bucket and account held_total
 ```
 
-Settlement uses `WHERE state = 'HELD'` and expiry uses `WHERE state = 'HELD' AND expires_at < now()`, so exactly one wins. If expiry wins, settlement affects zero rows and Vaullet publishes `ledger.settlement.rejected`; Transaction Service fails the transaction. With a 5-minute expiry against a sub-second happy path, this is a rare, loud, correct outcome rather than a silent overdraft.
+Settlement uses `WHERE state = 'HELD'` and expiry uses `WHERE state = 'HELD' AND expires_at < now()`, so exactly one wins. If expiry wins, settlement affects zero rows and Vaullet publishes `ledger.settlement-rejected`; Transaction Service fails the transaction. With a 5-minute expiry against a sub-second happy path, this is a rare, loud, correct outcome rather than a silent overdraft.
 
 Expired *buckets* are separate from expired *reservations*: a promotional bucket past `expires_at` is excluded from allocation and swept to zero with a `DEBIT` entry, so forfeiture is journalled rather than silent.
 
@@ -240,6 +285,11 @@ Redis stays — for balance-read caching, rate limiting, and sessions. It is no 
 ⚠️ **Vaullet is now on the latency critical path** for every transaction, and its availability bounds transaction availability.
 
 ⚠️ **Bucket allocation is materially more complex than a single balance** — greedy allocation across N buckets, per-bucket holds, and per-bucket settlement are the price of a real bonus platform. A deployment with no rewards module carries the schema but exercises only the one-bucket path.
+
+⚠️ **A deployment is locked to one currency.** An operator who later needs a second currency
+requires a migration, not a config change. Accepted: currency is a licensing-and-banking decision
+that changes at contract speed, and the per-account-per-currency extension above is a documented
+path rather than a redesign.
 
 ⚠️ **Two-phase lifecycle to implement** — reserve/settle/release/expire is more moving parts than a lock-and-check, and every path needs a test.
 
@@ -326,6 +376,10 @@ GET    /v1/accounts/{id}/balance  → {posted, held, available, withdrawable,
 ```
 
 `Idempotency-Key` header required on `POST /v1/reservations`.
+
+`POST /v1/reservations` takes an explicit `currency` and returns `422 CURRENCY_MISMATCH` if it does
+not equal `ledger_config.currency`. `GET /v1/accounts/{id}/balance` returns the currency alongside
+every amount, so no caller has to infer it from configuration.
 
 ### Revised transaction flow
 
