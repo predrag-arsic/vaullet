@@ -504,6 +504,12 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Trade-off**: Strong consistency over eventual consistency
   - **Future path**: Can migrate to Kafka partitioning if higher throughput needed
 
+- [ADR-002: Shared Contracts with Dual Publishing (Java + TypeScript)](docs/adr/002-shared-contracts-versioning-strategy.md) ✅
+  - **Decision**: Create `wallet-shared-contracts` repo that publishes both Maven artifact (for Java services) and NPM package (for frontends)
+  - **Strategy**: Backward compatibility by default, semantic versioning, automated TypeScript generation from Java DTOs
+  - **Frontend-friendly**: DTO suffix stripped (TransactionDTO → Transaction in TypeScript)
+  - **Benefits**: Single source of truth, independent service upgrades, type safety across stack
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
@@ -511,6 +517,8 @@ See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and h
 1. Define detailed API contracts (OpenAPI/Swagger)
 2. Design database schemas per service
 3. Define Kafka topic naming conventions
-4. Set up shared contracts repository
+4. ~~Set up shared contracts repository~~ ✅ **Done** - See ADR-002
 5. Design error handling and retry strategies
 6. Plan disaster recovery and data backup
+7. Decide on database-per-service vs shared database strategy
+8. Define monitoring and observability requirements

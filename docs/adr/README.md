@@ -38,6 +38,7 @@ ADRs document important architectural decisions made during the development of t
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
 | [001](001-distributed-locking-for-balance-consistency.md) | Use Redis Distributed Locking for Balance Consistency | ✅ Accepted | 2026-08-26 |
+| [002](002-shared-contracts-versioning-strategy.md) | Shared Contracts with Dual Publishing (Java + TypeScript) | ✅ Accepted | 2026-08-27 |
 
 ## Upcoming Decisions
 
