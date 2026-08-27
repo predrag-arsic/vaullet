@@ -80,12 +80,135 @@ if you dont mi# Vaullet Walleting System - Architecture Overview
 │                                                                           │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
 │  │   PostgreSQL     │  │     Redis        │  │   Monitoring     │      │
-│  │   (Per Service)  │  │  (Cache, Locks)  │  │  (Prometheus,    │      │
-│  │                  │  │                  │  │   Grafana)       │      │
+│  │   (Hybrid)       │  │  (Cache, Locks)  │  │  (Prometheus,    │      │
+│  │   See below ↓    │  │                  │  │   Grafana)       │      │
 │  └──────────────────┘  └──────────────────┘  └──────────────────┘      │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Database Architecture (Hybrid Strategy)
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                    Isolated Databases (Critical)                    │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+│ Vaullet Service │────────→│   vaullet_db    │         │ Transaction Svc │
+│                 │         │   PostgreSQL    │         │                 │
+│ - Append-only   │         │                 │         │ - Mutable state │
+│ - Immutable     │         │ - ledger_entries│         │ - High volume   │
+│ - Source of     │         │ - balances      │         │ - Lifecycle     │
+│   truth         │         │ - audit_log     │         │                 │
+└─────────────────┘         └─────────────────┘         └─────────────────┘
+                                                                 │
+                                                                 ↓
+                                                         ┌─────────────────┐
+                                                         │ transactions_db │
+                                                         │   PostgreSQL    │
+                                                         │                 │
+                                                         │ - transactions  │
+                                                         │ - refunds       │
+┌─────────────────┐                                     │ - metadata      │
+│ Fraud Detection │                                     └─────────────────┘
+│     Service     │
+│                 │
+│ - Real-time ML  │
+│ - Pattern detect│         ┌─────────────────┐
+│ - Case mgmt     │────────→│    fraud_db     │
+│                 │         │ PostgreSQL +    │
+└─────────────────┘         │ Elasticsearch   │
+                            │                 │
+                            │ - fraud_cases   │
+                            │ - fraud_rules   │
+                            │ - patterns (ES) │
+                            └─────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│              Shared Database (Supporting Services)                  │
+└─────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────┐         ┌─────────────────────────────────────┐
+│ Limits Service  │────────→│         support_db (PostgreSQL)     │
+└─────────────────┘         │                                     │
+                            │  ┌────────────────────────────────┐ │
+┌─────────────────┐         │  │ limits_schema                  │ │
+│ Bonus Service   │────────→│  │ - user_limits                  │ │
+└─────────────────┘         │  │ - limit_configurations         │ │
+                            │  └────────────────────────────────┘ │
+┌─────────────────┐         │                                     │
+│ Subscription Svc│────────→│  ┌────────────────────────────────┐ │
+└─────────────────┘         │  │ bonus_schema                   │ │
+                            │  │ - bonuses                      │ │
+┌─────────────────┐         │  │ - bonus_campaigns              │ │
+│ Notification Svc│────────→│  └────────────────────────────────┘ │
+└─────────────────┘         │                                     │
+                            │  ┌────────────────────────────────┐ │
+┌─────────────────┐         │  │ subscription_schema            │ │
+│  Audit Service  │────────→│  │ notification_schema            │ │
+└─────────────────┘         │  │ audit_schema                   │ │
+                            │  └────────────────────────────────┘ │
+                            └─────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                   Analytics / Reporting Layer                       │
+└─────────────────────────────────────────────────────────────────────┘
+
+                    ┌────────────────────────────────┐
+                    │      Apache Kafka Topics       │
+                    │  transaction.*, bonus.*,       │
+                    │  refund.*, fraud.*, etc.       │
+                    └────────────────────────────────┘
+                                   │
+                                   ↓ (ETL consumes events)
+                    ┌────────────────────────────────┐
+                    │   Reporting ETL Service        │
+                    │   - Joins data from events     │
+                    │   - Denormalizes               │
+                    │   - Pre-aggregates metrics     │
+                    └────────────────────────────────┘
+                                   │
+                                   ↓
+                    ┌────────────────────────────────┐
+                    │      reporting_db              │
+                    │   PostgreSQL (Phase 1)         │
+                    │   → ClickHouse (Phase 2)       │
+                    │                                │
+                    │ - transaction_analytics        │
+                    │ - daily_metrics                │
+                    │ - user_summaries               │
+                    │ - merchant_analytics           │
+                    └────────────────────────────────┘
+                                   ↑
+                                   │ (Read-only queries)
+                    ┌────────────────────────────────┐
+                    │    BI Tools / Dashboards       │
+                    │   Metabase, Tableau, etc.      │
+                    └────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Cache Layer                                 │
+└─────────────────────────────────────────────────────────────────────┘
+
+                    ┌────────────────────────────────┐
+                    │      Redis Cluster             │
+                    │   (3 masters, 3 replicas)      │
+                    │                                │
+                    │ Namespaces:                    │
+                    │ - session:* (Auth)             │
+                    │ - lock:balance:* (Transaction) │
+                    │ - limits:counter:* (Limits)    │
+                    │ - fraud:cache:* (Fraud)        │
+                    └────────────────────────────────┘
+```
+
+**Database Summary**:
+- **6 databases total**: 3 isolated + 1 shared + 1 reporting + 1 Redis
+- **Isolated**: Vaullet (critical ledger), Transactions (high volume), Fraud (special tech)
+- **Shared**: Support services with schema-level isolation
+- **Reporting**: Separate read-optimized database (CQRS pattern)
+- See [ADR-003](docs/adr/003-hybrid-database-strategy-with-analytics.md) for details
 
 ## Service Details
 
@@ -510,15 +633,24 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Frontend-friendly**: DTO suffix stripped (TransactionDTO → Transaction in TypeScript)
   - **Benefits**: Single source of truth, independent service upgrades, type safety across stack
 
+- [ADR-003: Hybrid Database Strategy with Separate Analytics Database](docs/adr/003-hybrid-database-strategy-with-analytics.md) ✅
+  - **Decision**: Use hybrid approach with 3 isolated databases (Vaullet, Transactions, Fraud) + 1 shared database (Support services) + dedicated Reporting database
+  - **Isolated**: Vaullet (append-only ledger), Transactions (high volume), Fraud Detection (different tech needs)
+  - **Shared**: Limits, Bonus, Subscription, Notification, Audit services share `support_db` with schema-per-service isolation
+  - **Reporting**: Separate analytics database populated via Kafka events (CQRS pattern), decouples reporting from operational performance
+  - **Benefits**: Critical data isolated, cost-effective, operationally balanced, room to evolve
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
 
 1. Define detailed API contracts (OpenAPI/Swagger)
-2. Design database schemas per service
+2. ~~Design database schemas per service~~ ✅ **Done** - See ADR-003
 3. Define Kafka topic naming conventions
 4. ~~Set up shared contracts repository~~ ✅ **Done** - See ADR-002
 5. Design error handling and retry strategies
 6. Plan disaster recovery and data backup
-7. Decide on database-per-service vs shared database strategy
+7. ~~Decide on database-per-service vs shared database strategy~~ ✅ **Done** - See ADR-003 (Hybrid approach)
 8. Define monitoring and observability requirements
+9. Design authentication and authorization strategy (JWT, OAuth2, service-to-service auth)
+10. Define deployment strategy (CI/CD, blue-green, canary)
