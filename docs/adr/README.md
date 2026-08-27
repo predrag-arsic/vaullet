@@ -37,9 +37,10 @@ ADRs document important architectural decisions made during the development of t
 
 | ADR | Title | Status | Date |
 |-----|-------|--------|------|
-| [001](001-distributed-locking-for-balance-consistency.md) | Use Redis Distributed Locking for Balance Consistency | ✅ Accepted | 2026-08-26 |
+| [001](001-distributed-locking-for-balance-consistency.md) | Use Redis Distributed Locking for Balance Consistency | ⛔ Superseded by [004](004-atomic-balance-reservations.md) | 2026-08-26 |
 | [002](002-shared-contracts-versioning-strategy.md) | Shared Contracts with Dual Publishing (Java + TypeScript) | ✅ Accepted | 2026-08-27 |
 | [003](003-hybrid-database-strategy-with-analytics.md) | Hybrid Database Strategy with Separate Analytics Database | ✅ Accepted | 2026-08-27 |
+| [004](004-atomic-balance-reservations.md) | Atomic Balance Reservations in the Ledger | ✅ Accepted | 2026-08-27 |
 
 ## Upcoming Decisions
 
@@ -49,6 +50,7 @@ Track decisions that need to be made:
 - [ ] Kafka topic naming conventions
 - [ ] Event schema versioning strategy
 - [ ] Polyrepo CI/CD pipeline approach
+- [ ] Module composition / per-contract enablement (ADR-005)
 - [ ] Service-to-service authentication (mutual TLS vs JWT)
 - [ ] API versioning strategy
 - [ ] Multi-currency support approach

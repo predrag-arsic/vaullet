@@ -2,7 +2,15 @@
 
 ## Status
 
-**Accepted** (2026-08-26)
+**Superseded** (2026-08-27) by [ADR-004: Atomic Balance Reservations in the Ledger](004-atomic-balance-reservations.md)
+
+~~Accepted (2026-08-26)~~
+
+> **Why superseded**: The lock described here guards a balance *read*, while the balance *write*
+> happens asynchronously in Vaullet after the lock is released. The protected state is mutated
+> outside the critical section, so the lock does not prevent the overdraft scenario this ADR was
+> written to prevent. See [ADR-004](004-atomic-balance-reservations.md) for the failure trace and
+> the replacement design. Never implemented — no code was affected.
 
 ## Context
 
