@@ -41,6 +41,7 @@ ADRs document important architectural decisions made during the development of t
 | [002](002-shared-contracts-versioning-strategy.md) | Shared Contracts with Dual Publishing (Java + TypeScript) | ✅ Accepted | 2026-08-27 |
 | [003](003-hybrid-database-strategy-with-analytics.md) | Hybrid Database Strategy with Separate Analytics Database | ✅ Accepted | 2026-08-27 |
 | [004](004-atomic-balance-reservations.md) | Atomic Balance Reservations in the Ledger | ✅ Accepted | 2026-08-27 |
+| [005](005-module-composition-and-deployment-topology.md) | Module Composition and Deployment Topology | ✅ Accepted | 2026-08-27 |
 
 ## Upcoming Decisions
 
@@ -50,7 +51,7 @@ Track decisions that need to be made:
 - [ ] Kafka topic naming conventions
 - [ ] Event schema versioning strategy
 - [ ] Polyrepo CI/CD pipeline approach
-- [ ] Module composition / per-contract enablement (ADR-005)
+- [ ] Authentication strategy: local vs federated identity (ADR-006)
 - [ ] Service-to-service authentication (mutual TLS vs JWT)
 - [ ] API versioning strategy
 - [ ] Multi-currency support approach

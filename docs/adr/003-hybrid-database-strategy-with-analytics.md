@@ -3,11 +3,13 @@
 ## Status
 
 **Accepted** (2026-08-27)
-**Updated** (2026-08-27) - Revised to database-per-domain with strategic grouping
+**Revised** (2026-08-27) — database-per-domain with strategic grouping: `rewards_db` and `auth_db`
+split out, Bonus moved off `support_db`, Scheduler added, the analytics store renamed to `datawarehouse_db`,
+and provisioning made conditional on deployed modules (see [ADR-005](005-module-composition-and-deployment-topology.md)).
 
 ## Context
 
-The Vaullet walleting system uses a polyrepo microservices architecture with 12 services. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
+The Vaullet walleting system uses a polyrepo microservices architecture with 15 services plus an Admin UI. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
 
 ### Key Requirements
 
@@ -32,7 +34,7 @@ Financial systems require complex reporting that spans multiple services:
 
 **Full separation** (database per service):
 - ✅ Maximum isolation, independent scaling
-- ❌ 12 databases to manage, higher cost, operational overhead
+- ❌ 15 databases to manage, higher cost, operational overhead
 
 **Shared database** (all services):
 - ✅ Simple, low cost, easy JOINs
@@ -46,7 +48,7 @@ Financial systems require complex reporting that spans multiple services:
 
 We will use a **hybrid database strategy** with clear separation criteria, plus a **dedicated analytics database** for reporting.
 
-### Operational Databases (4 Databases)
+### Operational Databases (6 Databases)
 
 #### 1. Vaullet Database (Isolated) 🔐
 
@@ -197,7 +199,10 @@ fraud_search (Elasticsearch)
 
 #### 4. Support Services Database (Shared)
 
-**Services**: Limits, Bonus, Subscription, Notification, Audit (share this DB)
+**Services**: Limits, Subscription, Notification, Audit, Scheduler (share this DB)
+
+> **Revised**: Bonus moved to `rewards_db` — see #5. Scheduler added; it is platform infrastructure
+> (ADR-005) and always deployed.
 
 **Technology**: PostgreSQL with schema-per-service
 
@@ -220,26 +225,6 @@ limits_schema
     ├─ user_type (BASIC/PREMIUM)
     ├─ default_daily_limit
     └─ default_monthly_limit
-
--- Bonus Service schema
-bonus_schema
-├─ bonuses
-│   ├─ bonus_id (PK)
-│   ├─ user_id (indexed)
-│   ├─ transaction_id (indexed)
-│   ├─ bonus_amount
-│   ├─ bonus_type (CASHBACK/PROMOTION/LOYALTY)
-│   ├─ status (ACTIVE/REVOKED/EXPIRED)
-│   ├─ expires_at
-│   └─ created_at
-│
-└─ bonus_campaigns
-    ├─ campaign_id (PK)
-    ├─ campaign_name
-    ├─ bonus_percentage
-    ├─ merchant_category_filter
-    ├─ start_date
-    └─ end_date
 
 -- Subscription Service schema
 subscription_schema
@@ -282,7 +267,27 @@ audit_schema
     ├─ service_name (indexed)
     ├─ event_data (JSONB)
     └─ created_at (partitioned by month)
+
+-- Scheduler Service schema
+scheduler_schema
+├─ scheduled_jobs
+│   ├─ job_id (PK)
+│   ├─ job_type (indexed)
+│   ├─ cron_expression
+│   ├─ next_run_at (indexed)
+│   └─ is_active
+│
+└─ job_executions
+    ├─ execution_id (PK)
+    ├─ job_id (FK)
+    ├─ started_at
+    ├─ finished_at
+    └─ status (SUCCESS/FAILED/RETRYING)
 ```
+
+**Conditional schemas**: `subscription_schema` and `notification_schema` are created only when their
+modules are sold (ADR-005). `limits_schema`, `audit_schema` and `scheduler_schema` are always
+present — Limits and Audit are core, Scheduler is infrastructure.
 
 **Why shared**:
 - ✅ Lower transaction volumes (combined <100 TPS)
@@ -300,16 +305,68 @@ audit_schema
 GRANT USAGE ON SCHEMA limits_schema TO limits_service_user;
 GRANT ALL ON ALL TABLES IN SCHEMA limits_schema TO limits_service_user;
 
--- Bonus Service user can only access bonus_schema
-GRANT USAGE ON SCHEMA bonus_schema TO bonus_service_user;
-GRANT ALL ON ALL TABLES IN SCHEMA bonus_schema TO bonus_service_user;
+-- Subscription Service user can only access subscription_schema
+GRANT USAGE ON SCHEMA subscription_schema TO subscription_service_user;
+GRANT ALL ON ALL TABLES IN SCHEMA subscription_schema TO subscription_service_user;
 ```
 
 **Future evolution**: If any service outgrows the shared DB, it can be split into its own database.
 
 ---
 
-#### 5. Redis Cluster (Shared Cache)
+#### 5. Rewards Database (Shared)
+
+**Services**: Bonus, Loyalty, Referral
+
+**Technology**: PostgreSQL with schema-per-service
+
+**Why grouped**: One commercial domain, similar access patterns, and frequently reported on together
+("total rewards earned"). Schema-per-service keeps the boundaries enforced.
+
+```sql
+rewards_db
+├─ bonus_schema      (bonuses, bonus_campaigns, bonus_rules)
+├─ loyalty_schema    (loyalty_points, loyalty_tiers, redemptions, tier_configurations)
+└─ referral_schema   (referral_links, referrals, referral_rewards, referral_campaigns)
+```
+
+**Conditionally provisioned**: all three services are sellable modules (ADR-005). `rewards_db` is
+created only if at least one is sold, and each schema only for its own module. A core-only
+deployment has no `rewards_db` at all.
+
+**Boundary with the ledger**: these schemas hold *rules* — wagering terms, tier thresholds, campaign
+eligibility. They never hold balances. Promotional *money* lives in `vaullet_db` balance buckets
+(ADR-004), reached only by emitting grant events. Two services must not both believe they know what
+a user's money is.
+
+---
+
+#### 6. Auth Database (Isolated) 🔐
+
+**Service**: Auth Service
+
+**Technology**: PostgreSQL + Redis (sessions)
+
+**Why isolated**: Credentials and MFA secrets warrant a separate blast radius, separate credentials,
+and a separate backup/retention policy from operational data. It is also the one database whose
+contents differ structurally between the two Auth adapters (ADR-005 Category 4).
+
+```sql
+auth_db
+├─ users
+├─ credentials        (local provider only; empty under federated identity)
+├─ mfa_configs
+├─ roles
+├─ permissions
+└─ api_clients
+```
+
+Single-tenant deployment (ADR-005) means no `tenant_id`: every row in this database belongs to the
+one customer that owns the cluster.
+
+---
+
+#### 7. Redis Cluster (Shared Cache)
 
 **Services**: Auth, Transaction, Limits, Fraud Detection (shared)
 
@@ -319,18 +376,22 @@ GRANT ALL ON ALL TABLES IN SCHEMA bonus_schema TO bonus_service_user;
 ```
 redis_cluster
 ├─ session:* (Auth Service - user sessions)
-├─ lock:balance:* (Transaction Service - distributed locks)
+├─ balance:cache:* (Vaullet - read-through balance cache)
 ├─ limits:counter:* (Limits Service - real-time counters)
 └─ fraud:cache:* (Fraud Detection - recent transaction cache)
 ```
 
-**Why shared**: Redis is designed for multi-tenant use with namespacing
+> **Revised**: `lock:balance:*` removed. [ADR-004](004-atomic-balance-reservations.md) moved balance
+> consistency into a Postgres transaction inside Vaullet, so Redis no longer holds locks and is no
+> longer on the correctness path. Losing Redis now degrades latency; it cannot cause an overdraft.
+
+**Why shared**: Redis is designed for namespaced multi-workload use
 
 ---
 
 ### Analytics Database (Separate Read-Optimized Store)
 
-#### 6. Reporting Database
+#### 8. Analytics Database
 
 **Purpose**: Complex analytics, business intelligence, reporting
 
@@ -338,7 +399,7 @@ redis_cluster
 
 **Schema**:
 ```sql
-reporting_db
+datawarehouse_db
 
 -- Denormalized transaction analytics
 ├─ transaction_analytics
@@ -450,16 +511,29 @@ public class ReportingETLService {
 
 ## Database Summary
 
-| Database | Services | Technology | Purpose | Volume |
-|----------|----------|------------|---------|--------|
-| vaullet_db | Vaullet | PostgreSQL | Immutable ledger, source of truth | High (append-only) |
-| transactions_db | Transaction | PostgreSQL | Transaction lifecycle, mutable state | Very High (>1000 TPS) |
-| fraud_db | Fraud Detection, Risk Mgmt | PostgreSQL + Elasticsearch | Fraud cases, ML, pattern detection | Medium |
-| support_db | Limits, Bonus, Subscription, Notification, Audit | PostgreSQL (multi-schema) | Supporting services | Low-Medium |
-| redis_cluster | Auth, Transaction, Limits, Fraud | Redis Cluster | Sessions, locks, counters, cache | High (ephemeral) |
-| reporting_db | Reporting ETL Service | PostgreSQL → ClickHouse | Analytics, BI, reporting | High (read-heavy) |
+| Database | Services | Technology | Purpose | Volume | Always provisioned? |
+|----------|----------|------------|---------|--------|---------------------|
+| vaullet_db | Vaullet | PostgreSQL | Immutable ledger + balance buckets, source of truth | High (append-only) | Yes (core) |
+| transactions_db | Transaction (incl. Refund) | PostgreSQL | Transaction lifecycle, mutable state | Very High (>1000 TPS) | Yes (core) |
+| fraud_db | Fraud Detection, Risk Management | PostgreSQL + Elasticsearch | Fraud cases, ML, pattern detection | Medium | Yes (Fraud is core) |
+| auth_db | Auth | PostgreSQL | Credentials, MFA, roles, API clients | Medium | Yes (core) |
+| support_db | Limits, Subscription, Notification, Audit, Scheduler | PostgreSQL (multi-schema) | Supporting services | Low-Medium | Yes — schemas conditional |
+| rewards_db | Bonus, Loyalty, Referral | PostgreSQL (multi-schema) | Reward rules and campaigns | Medium | **No** — only if a rewards module is sold |
+| datawarehouse_db | Reporting ETL | PostgreSQL → ClickHouse | Analytics, BI, reporting | High (read-heavy) | **No** — only if Reporting ETL is sold |
+| redis_cluster | Auth, Vaullet, Limits, Fraud | Redis Cluster | Sessions, counters, cache | High (ephemeral) | Yes (infrastructure) |
 
-**Total infrastructure**: 5 PostgreSQL instances + 1 Redis Cluster + 1 Elasticsearch cluster
+**Total infrastructure (full deployment)**: 7 PostgreSQL databases + 1 Redis Cluster + 1 Elasticsearch cluster = **9 components**
+
+**Minimum (core-only contract)**: 5 PostgreSQL databases (`vaullet`, `transactions`, `fraud`, `auth`,
+`support`) + Redis + Elasticsearch = **7 components**
+
+### Provisioning is a function of the contract
+
+Per [ADR-005](005-module-composition-and-deployment-topology.md), a customer's deployment contains
+only the modules they bought, and database provisioning follows: `rewards_db` and
+`datawarehouse_db` exist only when something needs them, and conditional schemas inside `support_db`
+are created only for deployed services. A customer without Bonus pays for neither the pod nor the
+schema.
 
 ---
 
@@ -501,7 +575,7 @@ public class ReportingETLService {
 
 ### Alternative 1: Database Per Service (Full Separation)
 
-**Description**: Each of the 12 services gets its own dedicated database.
+**Description**: Each of the 15 services gets its own dedicated database.
 
 **Pros**:
 - Maximum isolation
@@ -547,7 +621,7 @@ public class ReportingETLService {
 -- Report query hitting operational DBs
 SELECT t.*, b.bonus_amount, f.risk_score
 FROM transactions_db.transactions t
-LEFT JOIN support_db.bonus_schema.bonuses b ON t.transaction_id = b.transaction_id
+LEFT JOIN rewards_db.bonus_schema.bonuses b ON t.transaction_id = b.transaction_id
 LEFT JOIN fraud_db.fraud_analysis_history f ON t.transaction_id = f.transaction_id
 WHERE t.created_at > NOW() - INTERVAL '30 days';
 ```
@@ -636,14 +710,34 @@ services:
     ports:
       - "5435:5432"
 
-  reporting-db:
+  auth-db:
     image: postgres:15
     environment:
-      POSTGRES_DB: reporting_db
-      POSTGRES_USER: reporting_user
-      POSTGRES_PASSWORD: ${REPORTING_DB_PASSWORD}
+      POSTGRES_DB: auth_db
+      POSTGRES_USER: auth_user
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD}
     ports:
       - "5436:5432"
+
+  # Conditional: only when a rewards module is sold (ADR-005)
+  rewards-db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: rewards_db
+      POSTGRES_USER: rewards_user
+      POSTGRES_PASSWORD: ${REWARDS_DB_PASSWORD}
+    ports:
+      - "5437:5432"
+
+  # Conditional: only when Reporting ETL is sold (ADR-005)
+  datawarehouse-db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: datawarehouse_db
+      POSTGRES_USER: reporting_user
+      POSTGRES_PASSWORD: ${DATAWAREHOUSE_DB_PASSWORD}
+    ports:
+      - "5438:5432"
 
   redis-cluster:
     image: redis:7
@@ -702,29 +796,45 @@ CREATE INDEX idx_transactions_created_at ON transactions(created_at);
 ### Shared Database Schema Isolation
 
 ```sql
--- support_db initialization
+-- support_db initialization (always-present schemas)
 CREATE SCHEMA limits_schema;
-CREATE SCHEMA bonus_schema;
-CREATE SCHEMA subscription_schema;
-CREATE SCHEMA notification_schema;
 CREATE SCHEMA audit_schema;
+CREATE SCHEMA scheduler_schema;
+
+-- Conditional: created only when the module is sold (ADR-005)
+CREATE SCHEMA subscription_schema;   -- if modules.subscription.enabled
+CREATE SCHEMA notification_schema;   -- if modules.notification.enabled
 
 -- Create service-specific users
-CREATE USER limits_service_user WITH PASSWORD 'secure_password';
-CREATE USER bonus_service_user WITH PASSWORD 'secure_password';
+CREATE USER limits_service_user       WITH PASSWORD 'secure_password';
+CREATE USER subscription_service_user WITH PASSWORD 'secure_password';
 
 -- Grant access only to respective schemas
 GRANT USAGE ON SCHEMA limits_schema TO limits_service_user;
 GRANT ALL ON ALL TABLES IN SCHEMA limits_schema TO limits_service_user;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA limits_schema TO limits_service_user;
 
-GRANT USAGE ON SCHEMA bonus_schema TO bonus_service_user;
-GRANT ALL ON ALL TABLES IN SCHEMA bonus_schema TO bonus_service_user;
-GRANT ALL ON ALL SEQUENCES IN SCHEMA bonus_schema TO bonus_service_user;
+GRANT USAGE ON SCHEMA subscription_schema TO subscription_service_user;
+GRANT ALL ON ALL TABLES IN SCHEMA subscription_schema TO subscription_service_user;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA subscription_schema TO subscription_service_user;
 
 -- Prevent cross-schema access
-REVOKE ALL ON SCHEMA limits_schema FROM bonus_service_user;
-REVOKE ALL ON SCHEMA bonus_schema FROM limits_service_user;
+REVOKE ALL ON SCHEMA limits_schema       FROM subscription_service_user;
+REVOKE ALL ON SCHEMA subscription_schema FROM limits_service_user;
+```
+
+```sql
+-- rewards_db initialization (provisioned only if a rewards module is sold)
+CREATE SCHEMA bonus_schema;      -- if modules.bonus.enabled
+CREATE SCHEMA loyalty_schema;    -- if modules.loyalty.enabled
+CREATE SCHEMA referral_schema;   -- if modules.referral.enabled
+
+CREATE USER bonus_service_user WITH PASSWORD 'secure_password';
+GRANT USAGE ON SCHEMA bonus_schema TO bonus_service_user;
+GRANT ALL ON ALL TABLES IN SCHEMA bonus_schema TO bonus_service_user;
+
+REVOKE ALL ON SCHEMA loyalty_schema  FROM bonus_service_user;
+REVOKE ALL ON SCHEMA referral_schema FROM bonus_service_user;
 ```
 
 ### Reporting ETL Service
@@ -805,36 +915,40 @@ public class TransactionAnalyticsETL {
 
 ### Migration from Shared to Isolated (Future)
 
-If a service in `support_db` outgrows the shared database:
+If a service in a shared database outgrows it — illustrated with Loyalty leaving `rewards_db`:
 
 **Step 1**: Create new database
 ```bash
-createdb bonus_db
+createdb loyalty_db
 ```
 
 **Step 2**: Export schema and data
 ```bash
-pg_dump -h support-db -U support_user -n bonus_schema support_db > bonus_export.sql
+pg_dump -h rewards-db -U rewards_user -n loyalty_schema rewards_db > loyalty_export.sql
 ```
 
 **Step 3**: Import to new database
 ```bash
-psql -h bonus-db -U bonus_user bonus_db < bonus_export.sql
+psql -h loyalty-db -U loyalty_user loyalty_db < loyalty_export.sql
 ```
 
-**Step 4**: Update Bonus Service config
+**Step 4**: Update Loyalty Service config
 ```yaml
 spring:
   datasource:
-    url: jdbc:postgresql://bonus-db:5432/bonus_db  # Changed
+    url: jdbc:postgresql://loyalty-db:5432/loyalty_db  # Changed
 ```
 
 **Step 5**: Deploy and verify
 
 **Step 6**: Drop from shared DB
 ```sql
-DROP SCHEMA bonus_schema CASCADE;
+DROP SCHEMA loyalty_schema CASCADE;
 ```
+
+Because deployments are per-customer (ADR-005), this migration runs per cluster and only for
+customers whose volume warrants it. Different customers may legitimately sit at different points
+in this evolution.
 
 ---
 
@@ -870,7 +984,7 @@ DROP SCHEMA bonus_schema CASCADE;
 | transactions_db | Hourly snapshots | 30 days | 1 hour | 30 min |
 | fraud_db | Daily snapshots | 90 days | 24 hours | 1 hour |
 | support_db | Daily snapshots | 30 days | 24 hours | 1 hour |
-| reporting_db | Daily snapshots | 7 days | 24 hours | 2 hours (rebuildable from events) |
+| datawarehouse_db | Daily snapshots | 7 days | 24 hours | 2 hours (rebuildable from events) |
 
 ---
 
@@ -889,11 +1003,11 @@ When reporting queries become slow (>5 seconds):
 - Add stream processing (Kafka Streams, Flink) for real-time aggregations
 - Introduce data warehouse concepts (star schema, fact tables)
 
-### Phase 3 (12-24 months): Split Support DB if Needed
+### Phase 3 (12-24 months): Split Shared DBs if Needed
 
-If Bonus Service or Limits Service volumes grow significantly:
-- Split `bonus_schema` into `bonus_db`
-- Split `limits_schema` into `limits_db`
+If a service in `rewards_db` or `support_db` grows significantly:
+- Split `bonus_schema` out of `rewards_db` into `bonus_db`
+- Split `limits_schema` out of `support_db` into `limits_db`
 - Follow migration procedure above
 
 ### Phase 4 (Future): Cloud Data Warehouse

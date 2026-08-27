@@ -3,6 +3,7 @@
 ## Status
 
 **Accepted** (2026-08-27)
+**Revised** (2026-08-27) — bucketed balances, to support independently sellable rewards modules
 
 Supersedes [ADR-001](001-distributed-locking-for-balance-consistency.md).
 
@@ -55,6 +56,7 @@ Two secondary problems in ADR-001, noted for completeness:
 - Zero tolerance for overdrafts
 - >1000 TPS system-wide, sub-200ms p95 approval latency
 - One tenant per deployment (see ADR-005) — isolation is at the cluster boundary, so balances are scoped by `account_id` alone
+- The ledger must express non-cash money (bonus, loyalty, referral) with distinct withdrawal rules, while remaining correct when no rewards module is deployed
 - Prefer proven, operationally simple mechanisms
 
 ## Decision
@@ -63,6 +65,16 @@ We will make **check-and-reserve a single atomic operation inside Vaullet**, and
 
 Available balance becomes `posted_balance − held_total`. Money is *held* synchronously at approval time and *settled* asynchronously at completion. A hold is a real row, committed in the same database transaction as the check that authorized it.
 
+### Balance buckets
+
+A single `posted_balance` scalar cannot express "the account holds $100, but $60 is bonus money with wagering still outstanding and cannot be withdrawn." Since Bonus is the flagship module — and Loyalty and Referral sell independently of it — the ledger models money as **typed buckets**.
+
+`CASH` always exists. Rewards modules create additional buckets by emitting grant events. With no rewards module deployed, every account has exactly one `CASH` bucket and the model degrades to a plain balance.
+
+Buckets are per *grant*, not per type: a user can hold three separate `BONUS` buckets with different wagering requirements and expiry dates, because that is what the terms of three separate promotions actually mean.
+
+**The ledger is authoritative about amounts and dumb about policy.** It stores `wagering_remaining` but never decides how a wager contributes to it — that is the Bonus module's rule, applied by emitting events. This keeps promotional logic out of the service that must stay correct when Bonus isn't deployed.
+
 ### Schema (vaullet_db)
 
 ```sql
@@ -70,24 +82,44 @@ Available balance becomes `posted_balance − held_total`. Money is *held* synch
 CREATE TABLE ledger_entries (
     entry_id        UUID PRIMARY KEY,
     account_id      UUID        NOT NULL,
+    bucket_id       UUID        NOT NULL REFERENCES balance_buckets(bucket_id),
     direction       TEXT        NOT NULL CHECK (direction IN ('DEBIT','CREDIT')),
     amount          NUMERIC(20,4) NOT NULL CHECK (amount > 0),
     reservation_id  UUID        NULL REFERENCES reservations(reservation_id),
     transaction_id  UUID        NOT NULL,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE UNIQUE INDEX ON ledger_entries (transaction_id, direction);
+CREATE UNIQUE INDEX ON ledger_entries (transaction_id, bucket_id, direction);
 
--- Derived projection. Rebuildable from ledger_entries + reservations at any time.
--- This is the concurrency anchor: one row per account.
+-- Per-account aggregate AND the single concurrency anchor.
+-- Every balance-changing operation locks this row first, before touching buckets.
+-- Derived: rebuildable by replaying ledger_entries.
 CREATE TABLE account_balances (
-    account_id      UUID          NOT NULL,
-    posted_balance  NUMERIC(20,4) NOT NULL DEFAULT 0,
+    account_id      UUID          PRIMARY KEY,
+    posted_balance  NUMERIC(20,4) NOT NULL DEFAULT 0,   -- sum over buckets
     held_total      NUMERIC(20,4) NOT NULL DEFAULT 0 CHECK (held_total >= 0),
     updated_at      TIMESTAMPTZ   NOT NULL DEFAULT now(),
-    PRIMARY KEY (account_id),
     CHECK (posted_balance - held_total >= 0)   -- overdraft is a schema violation
 );
+
+-- One row per grant. CASH is a singleton per account.
+CREATE TABLE balance_buckets (
+    bucket_id          UUID PRIMARY KEY,
+    account_id         UUID          NOT NULL REFERENCES account_balances(account_id),
+    bucket_type        TEXT          NOT NULL CHECK (bucket_type IN ('CASH','BONUS','LOYALTY','REFERRAL')),
+    source_module      TEXT          NULL,        -- NULL for CASH
+    grant_id           UUID          NULL,        -- idempotency anchor for the granting event
+    posted_balance     NUMERIC(20,4) NOT NULL DEFAULT 0,
+    held_total         NUMERIC(20,4) NOT NULL DEFAULT 0 CHECK (held_total >= 0),
+    withdrawable       BOOLEAN       NOT NULL,
+    wagering_remaining NUMERIC(20,4) NOT NULL DEFAULT 0,
+    spend_priority     SMALLINT      NOT NULL,    -- lower spends first
+    expires_at         TIMESTAMPTZ   NULL,
+    CHECK (posted_balance - held_total >= 0)
+);
+CREATE UNIQUE INDEX ON balance_buckets (grant_id) WHERE grant_id IS NOT NULL;
+CREATE UNIQUE INDEX ON balance_buckets (account_id) WHERE bucket_type = 'CASH';
+CREATE INDEX ON balance_buckets (account_id, spend_priority);
 
 -- Short-lived authorization holds.
 CREATE TABLE reservations (
@@ -101,9 +133,19 @@ CREATE TABLE reservations (
     UNIQUE (idempotency_key)
 );
 CREATE INDEX ON reservations (state, expires_at) WHERE state = 'HELD';
+
+-- Which buckets a hold draws from, and how much from each.
+CREATE TABLE reservation_allocations (
+    reservation_id  UUID          NOT NULL REFERENCES reservations(reservation_id),
+    bucket_id       UUID          NOT NULL REFERENCES balance_buckets(bucket_id),
+    amount          NUMERIC(20,4) NOT NULL CHECK (amount > 0),
+    PRIMARY KEY (reservation_id, bucket_id)
+);
 ```
 
-The `CHECK (posted_balance - held_total >= 0)` constraint is the backstop: even if application logic is wrong, Postgres refuses to record an overdraft. ADR-001 had no equivalent — nothing in the schema could have caught the bug.
+The two `CHECK (posted_balance - held_total >= 0)` constraints are the backstop, at both aggregate and bucket level: even with wrong application logic, Postgres refuses to record an overdraft. ADR-001 had no equivalent — nothing in its schema could have caught the bug.
+
+`withdrawable_balance` is `SUM(posted_balance - held_total) WHERE withdrawable`, computed on read. It is deliberately not stored: it is a question, not a fact.
 
 ### Reserve (synchronous, one transaction)
 
@@ -113,33 +155,50 @@ BEGIN;
 SELECT posted_balance, held_total
   FROM account_balances
  WHERE account_id = $1
-   FOR UPDATE;                        -- serializes this account only
+   FOR UPDATE;              -- the ONLY lock taken; serializes this account only
 
--- available = posted_balance - held_total
--- if available < $amount: ROLLBACK, return 409 INSUFFICIENT_FUNDS
+-- if (posted_balance - held_total) < $amount: ROLLBACK, return 409 INSUFFICIENT_FUNDS
 
-INSERT INTO reservations (reservation_id, account_id, amount,
-                          state, idempotency_key, expires_at)
-     VALUES ($id, $1, $amount, 'HELD', $key, now() + interval '5 minutes');
+SELECT bucket_id, posted_balance - held_total AS available
+  FROM balance_buckets
+ WHERE account_id = $1
+   AND (expires_at IS NULL OR expires_at > now())
+   AND available > 0
+ ORDER BY spend_priority;   -- allocate greedily across buckets
 
-UPDATE account_balances
-   SET held_total = held_total + $amount, updated_at = now()
+INSERT INTO reservations (...) VALUES (..., 'HELD', $key, now() + interval '5 minutes');
+INSERT INTO reservation_allocations (...) VALUES ...;   -- one row per bucket touched
+
+UPDATE balance_buckets  SET held_total = held_total + $alloc WHERE bucket_id = ANY($allocated);
+UPDATE account_balances SET held_total = held_total + $amount, updated_at = now()
  WHERE account_id = $1;
 
 COMMIT;
 ```
 
-Read and write are now in the same transaction, on the same row, in the same service. There is no window.
+Read and write are in the same transaction, on the same rows, in the same service. There is no window.
+
+**Deadlock safety**: every operation takes `account_balances` `FOR UPDATE` *first* and holds no other lock across a network call. Bucket rows are only ever touched while that account row is held, so two concurrent operations on the same account serialize on one row, and operations on different accounts never contend. Multi-row bucket updates cannot deadlock because they are always reached through the same single gate.
+
+**Spend priority** is set by the granting module and is a business decision (typically: expiring-soonest promotional money first, cash last, so users don't forfeit bonuses). The ledger sorts; it does not choose.
 
 ### Idempotency
 
 `UNIQUE (idempotency_key)` — keyed on `transaction_id`. A retried reserve (client timeout, Transaction Service restart) hits the constraint and returns the *existing* reservation rather than placing a second hold. This is not optional: without it, retries double-hold and reject legitimate transactions.
 
+Grants use `UNIQUE (grant_id)` on `balance_buckets` for the same reason — a redelivered `ValueGranted` event must not mint money twice. At-least-once delivery makes this mandatory, not defensive.
+
+### Grants (asynchronous)
+
+Bonus, Loyalty, and Referral each emit a common `ValueGranted` event (shared contract, per ADR-002). Vaullet consumes it and, in one transaction: insert a `balance_buckets` row, insert a `CREDIT` ledger entry, increment `account_balances.posted_balance`.
+
+Grants are event-driven, not synchronous, which is what keeps all three modules independently removable — the rule from ADR-005 that optional functionality lives on the event side. Vaullet consuming an event type that no deployed module emits costs nothing.
+
 ### Settle and Release
 
-On `transaction.completed`, in one transaction: insert the `ledger_entries` row, decrement `held_total`, apply the amount to `posted_balance`, mark the reservation `SETTLED`. Idempotent via the unique index on `(transaction_id, direction)`.
+On `transaction.completed`, in one transaction: insert one `ledger_entries` row per allocated bucket, decrement `held_total` on those buckets and on the account, apply amounts to `posted_balance`, mark the reservation `SETTLED`. Idempotent via the unique index on `(transaction_id, bucket_id, direction)`.
 
-On `transaction.failed` or cancellation: decrement `held_total`, mark `RELEASED`. No ledger entry — money that never moved leaves no journal record.
+On `transaction.failed` or cancellation: decrement `held_total` at both levels, mark `RELEASED`. No ledger entry — money that never moved leaves no journal record.
 
 ### Expiry
 
@@ -148,10 +207,12 @@ A sweeper releases abandoned holds:
 ```sql
 UPDATE reservations SET state = 'EXPIRED'
  WHERE state = 'HELD' AND expires_at < now()
- RETURNING reservation_id, account_id, amount;   -- then decrement held_total
+ RETURNING reservation_id;   -- then release allocations, bucket and account held_total
 ```
 
 Settlement uses `WHERE state = 'HELD'` and expiry uses `WHERE state = 'HELD' AND expires_at < now()`, so exactly one wins. If expiry wins, settlement affects zero rows and Vaullet publishes `ledger.settlement.rejected`; Transaction Service fails the transaction. With a 5-minute expiry against a sub-second happy path, this is a rare, loud, correct outcome rather than a silent overdraft.
+
+Expired *buckets* are separate from expired *reservations*: a promotional bucket past `expires_at` is excluded from allocation and swept to zero with a `DEBIT` entry, so forfeiture is journalled rather than silent.
 
 ### Redis
 
@@ -167,6 +228,8 @@ Redis stays — for balance-read caching, rate limiting, and sessions. It is no 
 ✅ **Crash-safe** — a crashed caller leaves a hold that expires cleanly; ADR-001's design left a lock that expired *while the operation continued*
 ✅ **Holds are a product feature** — "pending balance" is something wallet users expect to see; ADR-001 had nowhere to represent in-flight money
 ✅ **Per-account serialization only** — different accounts never contend, so system-wide throughput is unaffected
+✅ **Rewards modules stay independent** — Bonus, Loyalty and Referral each grant into the ledger without knowing about one another, and any subset can be deployed
+✅ **Withdrawal rules are enforced where the money lives** — `withdrawable` is a ledger property, so no module can accidentally cash out locked promotional funds
 
 ### Negative Consequences
 
@@ -175,6 +238,8 @@ Redis stays — for balance-read caching, rate limiting, and sessions. It is no 
 ⚠️ **`account_balances` is mutable state inside the "immutable" service.** To be precise about what append-only means here: `ledger_entries` is the immutable journal and remains the source of truth. `account_balances` and `reservations` are a derived projection, maintained transactionally and fully rebuildable by replaying the journal. This is the standard journal-plus-balances split every real ledger uses; the previous docs overstated the invariant.
 
 ⚠️ **Vaullet is now on the latency critical path** for every transaction, and its availability bounds transaction availability.
+
+⚠️ **Bucket allocation is materially more complex than a single balance** — greedy allocation across N buckets, per-bucket holds, and per-bucket settlement are the price of a real bonus platform. A deployment with no rewards module carries the schema but exercises only the one-bucket path.
 
 ⚠️ **Two-phase lifecycle to implement** — reserve/settle/release/expire is more moving parts than a lock-and-check, and every path needs a test.
 
@@ -187,6 +252,8 @@ Redis stays — for balance-read caching, rate limiting, and sessions. It is no 
 | Settlement/expiry race | Transaction fails after user saw approval | Expiry ≫ happy-path duration; failure is explicit and compensable, never an overdraft |
 | Long-running reserve transaction holds a row lock | Head-of-line blocking per account | Statement timeout of 1s; the transaction does no network I/O while holding the lock |
 | Projection drifts from journal | Wrong balances | Nightly reconciliation replaying `ledger_entries`; alert on any mismatch |
+| Bucket count grows unbounded on heavy promo users | Allocation scan slows | Sweep zero-balance and expired buckets; index on `(account_id, spend_priority)`; alert above ~50 active buckets per account |
+| Spend priority misconfigured | Users forfeit bonuses, or cash spent before expiring promo money | Priority is module-owned and covered by tests; reconciliation reports forfeited amounts daily |
 
 ## Alternatives Considered
 
@@ -249,9 +316,13 @@ The row-locking option was rejected on a performance argument that was never mea
 ### API (Vaullet)
 
 ```
-POST   /v1/reservations           → 201 {reservation_id, available_after}  | 409 INSUFFICIENT_FUNDS
+POST   /v1/reservations           → 201 {reservation_id, allocations[], available_after}
+                                  | 409 INSUFFICIENT_FUNDS
 DELETE /v1/reservations/{id}      → 204 (release)
-GET    /v1/accounts/{id}/balance  → {posted, held, available}
+GET    /v1/accounts/{id}/balance  → {posted, held, available, withdrawable,
+                                     buckets: [{type, source_module, available,
+                                                withdrawable, wagering_remaining,
+                                                expires_at}]}
 ```
 
 `Idempotency-Key` header required on `POST /v1/reservations`.
@@ -284,6 +355,8 @@ None required. ADR-001 was never implemented — no code exists yet. This is a c
 - `vaullet.held_ratio{account}` — alert above 0.5
 - `vaullet.row_lock.wait.p95` — early warning for hot accounts
 - `vaullet.reconciliation.mismatch.count` — must be zero
+- `vaullet.buckets.active{account}` — allocation cost scales with this; alert above 50
+- `vaullet.buckets.forfeited.amount` — promotional money expired unspent; a business metric the Bonus module owns
 
 ## References
 

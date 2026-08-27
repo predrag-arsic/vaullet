@@ -1,238 +1,126 @@
 # Current Discussion State - Vaullet Architecture
 
 **Date**: 2026-08-27
-**Topic**: Auth & User Management Strategy - Deployment Modes
+**Next topic**: Authentication strategy (ADR-006)
 
 ---
 
-## Context: Where We Are
+## Product Context
 
-We've completed 3 major architectural decisions (documented as ADRs):
+Vaullet is a **private portfolio project built to production-grade B2B standards** — the goal is an
+architecture that survives review by a senior engineer, not a system that currently ships.
 
-1. ✅ **ADR-001**: Redis distributed locking for balance consistency
-2. ✅ **ADR-002**: Shared contracts with dual publishing (Java + TypeScript)
-3. ✅ **ADR-003**: Hybrid database strategy (7 operational databases + data warehouse)
+The commercial model it is designed against:
 
-**Current task**: Designing authentication and user management strategy.
-
----
-
-## The Critical Decision: Two Deployment Modes
-
-### Mode A: Full Platform
-You own the entire user experience:
-- Users register/login on YOUR platform
-- You manage: Users, Auth, Transactions, Frontend, Everything
-- Example: You ARE the betting platform
-
-### Mode B: API-Only Service (White-Label/B2B)
-You're just the transaction/wallet infrastructure:
-- External platforms integrate via API
-- They manage: Users, Auth, Frontend
-- You provide: Transaction processing, Ledger, Limits, Fraud detection
-- Example: You provide wallet infrastructure to other betting platforms
+- **Single-tenant deployments.** Each customer (a wallet operator, initially betting platforms) gets
+  their own Kubernetes cluster. No shared infrastructure, no `tenant_id`, no cross-customer data
+  path. Isolation is the cluster boundary — stronger than row-level scoping, and often mandatory
+  under gambling licences with data-residency conditions.
+- **Modules are line items.** A contract determines which modules that customer's cluster runs.
+- **Bonus is the flagship.** The core wallet is the land; the bonus platform is the expected upsell.
 
 ---
 
-## Services Finalized (15 Backend + Admin UI)
+## Decisions Made
 
-### Core Wallet
-1. Transaction Service
-2. Vaullet Service (Ledger)
-3. Limits Service
-4. Refund Service (part of Transaction Service - same deployment)
-5. Subscription Service
+| ADR | Decision | Status |
+|-----|----------|--------|
+| 001 | Redis distributed locking for balance consistency | ⛔ Superseded by 004 |
+| 002 | Shared contracts, dual publishing (Java + TypeScript) | ✅ Accepted |
+| 003 | Hybrid database strategy with separate analytics DB | ✅ Accepted (revised) |
+| 004 | Atomic balance reservations in the ledger | ✅ Accepted |
+| 005 | Module composition and deployment topology | ✅ Accepted |
 
-### Rewards & Incentives
-6. Bonus Service
-7. Loyalty Service (points system, redemption)
-8. Referral Service (renamed from Affiliate - user referral program)
+### What ADR-004 changed
 
-### Security & Risk
-9. Auth Service ⭐ (critical decision pending)
-10. Fraud Detection Service
-11. Risk Management Service (shares fraud_db)
+ADR-001's lock guarded a balance *read* while the *write* happened asynchronously in Vaullet after
+the lock was released — so it did not prevent the overdraft it was written to prevent. Two
+withdrawals 50ms apart both passed. Never implemented; corrected on paper.
 
-### Supporting
-12. Notification Service
-13. Audit Service
-14. Scheduler Service
-15. Reporting ETL Service
+Replacement: `available = posted − held`. Check-and-reserve is one atomic Postgres transaction inside
+Vaullet, with `CHECK (posted_balance - held_total >= 0)` making an overdraft a schema violation.
+Redis leaves the correctness path entirely.
 
-**Admin**: Just frontend UI (aggregates data via REST APIs)
+Money is typed into **per-grant buckets** (`CASH`, `BONUS`, `LOYALTY`, `REFERRAL`), each with its own
+`withdrawable` flag, expiry and spend priority — because a single scalar cannot express "$100, of
+which $60 is bonus money with wagering outstanding." With no rewards module deployed, every account
+has one `CASH` bucket and the model degrades to a plain balance.
 
----
+### What ADR-005 established
 
-## Database Strategy Finalized
+**The rule**: *a synchronous dependency makes a component core; optional functionality communicates
+only through events.* Disabling an event consumer is safe — Kafka doesn't care that a consumer group
+is absent. Disabling a synchronous dependency is not, and both default recoveries are wrong
+(fail-closed halts transactions, fail-open silently disables a financial control). So the case is
+removed rather than handled.
 
-### 7 Operational Databases:
+**The invariant**: *no sellable module may depend on another sellable module.* The module graph is a
+star, so all 2⁷ = 128 combinations are valid by construction and the CI matrix collapses to 9.
 
-1. **vaullet_db** → Vaullet Service (isolated, append-only)
-2. **transactions_db** → Transaction + Refund Services (isolated, high volume)
-3. **fraud_db** → Fraud Detection + Risk Management (isolated, PostgreSQL + Elasticsearch)
-4. **rewards_db** → Bonus + Loyalty + Referral (shared, schema-per-service)
-5. **support_db** → Limits + Subscription + Notification + Audit + Scheduler (shared)
-6. **auth_db** → Auth Service (isolated for security) ⭐
-7. **datawarehouse_db** → Reporting ETL (eventual consistency OK)
+**Categories**:
 
-Plus:
-- **redis_cluster** (cache, locks, sessions)
-- **Elasticsearch** (fraud patterns)
+- **Core**: Transaction (incl. Refund), Vaullet, Auth, Fraud Detection, Limits, Audit, Admin UI
+- **Infrastructure**: Kafka, Redis, PostgreSQL, Elasticsearch, Scheduler
+- **Sellable**: Bonus ⭐, Loyalty, Referral, Subscription, Risk Management, Notification, Reporting ETL
+- **Adapters**: Auth identity provider (local | federated)
 
-**Total**: 10 infrastructure components
+Two deliberate overrides: **Audit** is event-driven but core, because an audit trail is a licence
+condition rather than a feature. **Scheduler** is infrastructure rather than a module, which removes
+Subscription's only sellable-to-sellable dependency.
 
-See: `/docs/database-grouping-strategy.md`
-
----
-
-## Current Discussion: Auth Service Architecture
-
-### The Challenge
-
-We need Auth Service to support TWO different use cases:
-
-**Case 1: Platform Users (Mode A)**
-- End users who use YOUR wallet platform
-- Register with email/password
-- Login, MFA, sessions
-- Standard user authentication
-
-**Case 2: External API Clients (Mode B)**
-- Other platforms integrating your wallet API
-- API key authentication
-- They send their users' IDs (`external_user_id`)
-- Multi-tenant (multiple client platforms)
-
-### Plus: Admin Users
-
-Two types of admins:
-1. **Platform Admins**: Your employees (manage system, fraud review, config)
-2. **Client Admins** (Mode B): Client's employees (manage their platform - NOT your concern)
+Enablement is **build-time** (per-customer Helm values), not runtime flags — "not installed" is
+demonstrable to a regulator; "flag is false" requires trusting runtime state.
 
 ---
 
-## Pending Questions (Need Your Answers)
+## Databases
 
-### Question 1: Which mode to start with?
-- **Option A**: Build Mode A (Full Platform) first, add Mode B later?
-- **Option B**: Build Mode B (API-Only) only?
-- **Option C**: Both from day 1? (complex!)
+6 operational PostgreSQL + 1 analytics + Redis + Elasticsearch = **9 components** full, **7** core-only.
 
-### Question 2: For Mode B (API-Only)
-- **Single client** (one betting platform) or **multi-tenant** (many clients)?
-- How much user data do you store? (just ID, or profile info?)
+| Database | Services | Provisioned |
+|----------|----------|-------------|
+| `vaullet_db` | Vaullet | Always |
+| `transactions_db` | Transaction (incl. Refund) | Always |
+| `fraud_db` | Fraud Detection, Risk Management | Always |
+| `auth_db` | Auth | Always |
+| `support_db` | Limits, Audit, Scheduler (+ Subscription, Notification if sold) | Always, schemas conditional |
+| `rewards_db` | Bonus, Loyalty, Referral | Only if a rewards module is sold |
+| `datawarehouse_db` | Reporting ETL | Only if sold |
 
-### Question 3: Admin users
-- Just **platform admins** (your employees)?
-- Or also **client admins** (if Mode B multi-tenant)?
-
-### Question 4: Reporting in Mode B
-- Do clients get their **own dashboard**?
-- Or just **API endpoints** to fetch data?
-- Or you provide **embeddable widgets**?
+**Boundary that matters**: `rewards_db` holds *rules* — wagering terms, tiers, campaigns. It never
+holds balances. Promotional *money* lives in `vaullet_db` buckets, reached only by emitting
+`ValueGranted`. Two services must not both believe they know what a user's money is.
 
 ---
 
-## Proposed Auth Architecture (Pending Your Answers)
+## Open Questions for ADR-006 (Auth)
 
-```sql
-auth_db
-
--- Mode A: Platform users
-users table:
-├─ user_id (PK)
-├─ user_type (END_USER / PLATFORM_ADMIN)
-├─ email
-├─ password_hash
-├─ ...
-
--- Mode B: API clients
-clients table:
-├─ client_id (PK)
-├─ client_name
-├─ api_key
-├─ api_secret_hash
-├─ webhook_url
-├─ ...
-
--- Mode B: External users (minimal tracking)
-external_users table:
-├─ client_id (FK)
-├─ external_user_id (client's user ID)
-├─ created_at
-├─ PRIMARY KEY (client_id, external_user_id)
-```
-
-### Unified User Identifier Pattern
-
-```java
-public class UserIdentifier {
-    private UserType type;  // PLATFORM_USER or EXTERNAL_USER
-    private String userId;  // platform user ID
-    private String clientId;  // (Mode B only)
-    private String externalUserId;  // (Mode B only)
-
-    public String getGlobalId() {
-        if (type == PLATFORM_USER) {
-            return "user:" + userId;
-        } else {
-            return "client:" + clientId + ":user:" + externalUserId;
-        }
-    }
-}
-```
-
-**In ledger**:
-```sql
-ledger_entries:
-├─ entry_id
-├─ user_identifier ("user:123" or "client:abc:user:xyz")
-├─ amount
-└─ ...
-```
-
-This allows the same ledger to work for both modes!
+1. **Identity model** — does Vaullet own end-user identity, or does the operator federate its
+   existing users in via OIDC? ADR-005 assumes both are supported as adapters; ADR-006 has to define
+   the internal contract both satisfy.
+2. **Admin roles** — what does the operator's own staff need? Fraud reviewer, support agent, finance,
+   super-admin? Permissions model follows from this.
+3. **Service-to-service auth** — mTLS or JWT between services inside the cluster.
+4. **Session strategy** — JWT lifetime, refresh, revocation. Revocation is the hard part with JWTs and
+   interacts with the `account.locked` event from Risk Management.
 
 ---
 
-## Recommendation
+## Known Gaps
 
-**Start with Mode A (Full Platform), design for Mode B**
-
-**Phase 1 (Now)**: Full Platform
-- User management
-- Full auth system
-- All services
-- Frontend
-
-**Phase 2 (Later)**: Add API-Only Mode
-- Add `clients` table
-- Add API key authentication
-- Add multi-tenancy support
-- Keep existing services, expose via API
-
-**Why**: Easier to build full platform, then extract API, than vice versa.
+- **Per-customer cost floor is high** — core alone is 7 services plus Kafka, Redis, Elasticsearch and
+  5 Postgres databases. Small operators may be unprofitable on this topology. ADR-005 Alternative 3
+  (modular monolith) is the documented candidate for a low-cost tier.
+- **Elasticsearch is core by inheritance** — Fraud Detection is core and ADR-003 gives it ES. Worth
+  revisiting whether pattern search can degrade to Postgres-only.
+- **15 services is a lot for a solo project.** The module boundaries have commercial justification, but
+  "sellable unit" and "separately deployed service" are not the same thing.
 
 ---
 
-## Next Steps
-
-1. **Answer the 4 questions above**
-2. Design complete Auth Service architecture
-3. Document as ADR-004
-4. Design admin permissions model
-5. Design API authentication flow (for Mode B future)
-
----
-
-## Files to Reference
+## Files
 
 - Architecture overview: `/arch.md`
-- ADRs: `/docs/adr/001-*.md`, `002-*.md`, `003-*.md`
+- ADRs: `/docs/adr/00{1..5}-*.md`
 - Database grouping: `/docs/database-grouping-strategy.md`
 - Shared contracts example: `/docs/shared-contracts-example.md`
-- Event flows: Documented in earlier conversation (transaction, refund, recurring payment, fraud)
-
----
-
-**Status**: Waiting for answers to 4 questions to proceed with Auth architecture design.

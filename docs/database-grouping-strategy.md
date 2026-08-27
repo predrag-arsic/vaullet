@@ -5,7 +5,13 @@
 **Decision**: Database-per-domain with strategic grouping to balance isolation with operational overhead.
 
 **Services**: 15 backend services + Admin UI
-**Databases**: 7 operational databases + Redis + Data Warehouse = 9 total
+**Databases**: 6 operational PostgreSQL + 1 analytics PostgreSQL + Redis Cluster + Elasticsearch
+= **9 infrastructure components** in a full deployment
+
+**Provisioning is conditional.** Per [ADR-005](adr/005-module-composition-and-deployment-topology.md),
+each customer runs their own cluster containing only the modules their contract includes. `rewards_db`
+and `datawarehouse_db` exist only when something needs them; some `support_db` schemas likewise. A
+core-only deployment runs **7 components** (5 PostgreSQL + Redis + Elasticsearch).
 
 ---
 
@@ -72,7 +78,7 @@ fraud_search (Elasticsearch)
 
 ---
 
-### 4. Rewards Database (Shared)
+### 4. Rewards Database (Shared) — CONDITIONAL
 
 **Services**: Bonus Service, Loyalty Service, Referral Service
 
@@ -149,20 +155,17 @@ scheduler_schema
 
 ---
 
-### 6. Auth Database (Isolated or Shared?)
+### 6. Auth Database (Isolated) 🔐 — DECIDED
 
 **Service**: Auth Service
 
-**Option A: Separate auth_db**
-- Pro: Security isolation
-- Pro: Can use specialized tech (Redis for sessions + PostgreSQL for users)
-- Con: One more database to manage
+**Decision**: separate `auth_db`. Credentials and MFA secrets warrant their own blast radius,
+credentials, and backup/retention policy. It is also the one database whose contents differ
+structurally between the two Auth adapters (local credential store vs. federated OIDC — ADR-005
+Category 4), so coupling it to support services would have been wrong on two counts.
 
-**Option B: Part of support_db**
-- Pro: Fewer databases
-- Con: Auth coupled with support services
-
-**Recommendation**: **Separate** for security isolation
+Single-tenant deployment means no `tenant_id`: every row belongs to the one customer owning the
+cluster.
 
 ```sql
 auth_db (PostgreSQL)
@@ -178,7 +181,7 @@ redis_cluster (sessions)
 
 ---
 
-### 7. Data Warehouse (Analytics)
+### 7. Data Warehouse (Analytics) — CONDITIONAL
 
 **Service**: Reporting ETL Service
 
@@ -211,11 +214,15 @@ datawarehouse_db (PostgreSQL → ClickHouse in Phase 2)
 | **datawarehouse_db** | Reporting ETL | PostgreSQL/ClickHouse | High (read) | - (Rebuildable) |
 | **redis_cluster** | All (cache, locks, sessions) | Redis | High | ⭐⭐ High |
 
-**Total**: 7 operational PostgreSQL + 1 Elasticsearch + 1 Redis + 1 Data Warehouse = **10 infrastructure components**
+**Total (full deployment)**: 6 operational PostgreSQL + 1 analytics PostgreSQL + 1 Elasticsearch
++ 1 Redis = **9 infrastructure components**
 
-vs. Database-per-service would be: 15 PostgreSQL + 1 ES + 1 Redis + 1 DW = **18 components**
+**Total (core-only contract)**: 5 PostgreSQL + 1 Elasticsearch + 1 Redis = **7 components**
 
-**Savings**: 8 fewer databases to manage while maintaining good isolation
+vs. database-per-service: 15 PostgreSQL + 1 ES + 1 Redis + 1 DW = **18 components**
+
+**Savings**: 9 fewer databases to operate while keeping isolation where it matters. This compounds
+under single-tenant deployment — the saving is per customer cluster, not once.
 
 ---
 
@@ -224,7 +231,7 @@ vs. Database-per-service would be: 15 PostgreSQL + 1 ES + 1 Redis + 1 DW = **18 
 ```
 Vaullet Service           → vaullet_db
 Transaction Service       → transactions_db
-Refund Service            → transactions_db (or same as Transaction Service)
+Refund (in Transaction Svc) → transactions_db (same deployment, not a separate service)
 Fraud Detection Service   → fraud_db
 Risk Management Service   → fraud_db
 Bonus Service             → rewards_db (bonus_schema)
@@ -273,23 +280,31 @@ REVOKE ALL ON SCHEMA referral_schema FROM bonus_service_user;
 
 ---
 
-## Questions for Finalization
+## Finalized Decisions
 
-1. **Refund Service**:
-   - Separate service sharing `transactions_db`?
-   - Or just part of Transaction Service (no separate deployment)?
+All three open questions are resolved:
 
-2. **Auth Database**:
-   - Separate `auth_db` (recommended for security)?
-   - Or part of `support_db`?
+1. **Refund Service** → **part of Transaction Service.** Same database, same deployment. Splitting it
+   would have put two services on one database with no independent scaling or release benefit.
 
-3. **Risk Management Service**:
-   - Share `fraud_db`?
-   - Or separate `risk_mgmt_db`?
+2. **Auth Database** → **separate `auth_db`.** Security isolation, and the adapter difference
+   described in §6.
 
-**Current recommendation**:
-- Refund = part of Transaction Service (same database, same deployment)
-- Auth = separate `auth_db`
-- Risk Management = shares `fraud_db`
+3. **Risk Management Service** → **shares `fraud_db`.** Same domain, same data, and Risk Management
+   is a sellable module whose only dependency (Fraud Detection) is core — so the dependency is always
+   satisfied and the ADR-005 star invariant holds.
 
-This gives us **7 operational databases** total.
+This gives **6 operational databases** plus `datawarehouse_db`.
+
+## Open Items
+
+- Retention and archival policy per database (`vaullet_db` needs 7 years; `datawarehouse_db` is
+  rebuildable from events and needs almost none)
+- Whether Elasticsearch can degrade to Postgres-only for small deployments, making it a Category 4
+  adapter rather than core-by-inheritance (flagged in ADR-005)
+
+## References
+
+- [ADR-003: Hybrid Database Strategy](adr/003-hybrid-database-strategy-with-analytics.md)
+- [ADR-004: Atomic Balance Reservations](adr/004-atomic-balance-reservations.md) — `vaullet_db` schema
+- [ADR-005: Module Composition](adr/005-module-composition-and-deployment-topology.md) — conditional provisioning
