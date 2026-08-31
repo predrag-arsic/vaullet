@@ -828,21 +828,11 @@ settlement, chargebacks), a payment gateway or PSP (it consumes rails, it does n
 KYC/AML vendor (the operator holds identity — ADR-006), an FX or remittance engine (one currency per
 deployment — ADR-004), or a game aggregator or sportsbook.
 
-### Known gap: safeguarding and float reconciliation
+### Deferred: safeguarding and float reconciliation
 
-Stored value means real money exists outside the system. If accounts hold €500k in aggregate, a real
-bank account holds €500k, and in most jurisdictions that money must be **safeguarded** — segregated
-from operating funds and reconciled against the customer ledger **at least once every business day**
-under FCA e-money rules, with segregation the method used by the large majority of firms.
-
-The architecture does not currently do this. ADR-004 reconciles the *projection against the journal* —
-internal consistency — but nothing reconciles the journal against the external float. There is no
-house/float account, no daily external reconciliation, and no break detection for the case where the
-ledger says €500,000.00 and the bank says €499,997.00.
-
-This is the largest remaining gap for production readiness — larger than service-to-service auth —
-because it is a licensing condition rather than an engineering preference, and it is the first thing
-a regulator or a reviewer with payments background asks about. Tracked as a pending ADR.
+Stored value means real money sits in a bank account outside the system, and regulated operators are
+required to keep it segregated and reconciled against the customer ledger. Vaullet does not address
+this yet — deliberately deferred as a licensing concern rather than a design-phase one.
 
 ## Deployment Topology
 

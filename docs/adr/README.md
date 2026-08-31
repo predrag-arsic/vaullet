@@ -51,7 +51,6 @@ Track decisions that need to be made:
 
 - [ ] Database schema design for Vaullet (append-only ledger)
 - [ ] Polyrepo CI/CD pipeline approach
-- [ ] **Safeguarding and float reconciliation** (segregated client funds, daily external reconciliation, break detection) — regulatory requirement for stored value
 - [ ] Service-to-service authentication (mutual TLS vs JWT)
 - [ ] API versioning strategy
 - [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
