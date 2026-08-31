@@ -44,12 +44,13 @@
 │                                                                           │
 │  ┌──────────────────┐  ┌────────────────────┐  ┌──────────────────┐    │
 │  │  Auth Service    │  │ Fraud Detection    │  │ Risk Management  │    │
-│  │                  │  │     Service        │  │    Service       │    │
-│  │  - JWT tokens    │  │                    │  │                  │    │
-│  │  - User auth     │  │  - Real-time rules │  │  - Case mgmt     │    │
-│  │  - Permissions   │  │  - ML scoring      │  │  - Investigation │    │
-│  │  - MFA           │  │  - Pattern detect  │  │  - Reviews       │    │
-│  │  - Sessions      │  │  - Risk scoring    │  │  - Actions       │    │
+│  │  + Keycloak      │  │     Service        │  │    Service       │    │
+│  │                  │  │                    │  │                  │    │
+│  │  - Keycloak: IdP │  │  - Real-time rules │  │  - Case mgmt     │    │
+│  │    (users, MFA,  │  │  - ML scoring      │  │  - Investigation │    │
+│  │    brokering)    │  │  - Pattern detect  │  │  - Reviews       │    │
+│  │  - Adapter:      │  │  - Risk scoring    │  │  - Actions       │    │
+│  │    anchor+status │  │                    │  │                  │    │
 │  └──────────────────┘  └────────────────────┘  └──────────────────┘    │
 │                                                                          │
 └──────────────────────────────────────────────────────────────────────────┘
@@ -75,7 +76,9 @@
 │                                                                           │
 │  ┌──────────────────────────────────────────────────────────────────┐   │
 │  │                    Apache Kafka (Event Bus)                       │   │
-│  │  Topics: transaction.*, refund.*, fraud.*, bonus.*, etc.         │   │
+│  │  Topics: <domain>.<event-name>.v<major>   (ADR-007)              │   │
+│  │  e.g. transaction.created.v1, rewards.value-granted.v1           │   │
+│  │  Keyed by account_id · JSON Schema · FULL_TRANSITIVE registry    │   │
 │  └──────────────────────────────────────────────────────────────────┘   │
 │                                                                           │
 │  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐      │
@@ -260,6 +263,8 @@
   balance in one Postgres transaction (ADR-004). This is what makes overdrafts impossible.
 - **Typed money**: balances are held in per-grant buckets (`CASH`, `BONUS`, `LOYALTY`, `REFERRAL`)
   with their own `withdrawable` flag, expiry and spend priority.
+- **Single currency**: one deployment, one operator-supplied currency, recorded immutably in
+  `ledger_config` and asserted at every API boundary (ADR-004). Not a per-row column.
 
 **Responsibilities**:
 - Atomically reserve, settle, release and expire holds
@@ -277,13 +282,13 @@
 **Event Consumption**:
 - `transaction.completed` → settle reservation, write journal entries
 - `transaction.failed` → release reservation
-- `ValueGranted` (from Bonus / Loyalty / Referral) → mint a new balance bucket
+- `rewards.value-granted` (from Bonus / Loyalty / Referral) → mint a new balance bucket
 - `bonus.revoked` → debit the granting bucket
 
 **Event Production**:
-- `ledger.entry.recorded`
-- `ledger.balance.updated`
-- `ledger.settlement.rejected` (hold expired before settlement)
+- `ledger.entry-recorded`
+- `ledger.balance-updated`
+- `ledger.settlement-rejected` (hold expired before settlement)
 
 ---
 
@@ -314,12 +319,11 @@
 - `transaction.approved`
 - `transaction.completed`
 - `transaction.failed`
-- `transaction.status.updated`
 
 **Event Consumption**:
 - `refund.initiated` → Link refund to transaction
 - `bonus.applied` → Update transaction with bonus
-- `fraud.suspicion.detected` → Update transaction status
+- `fraud.suspicion-detected` → Update transaction status
 
 ---
 
@@ -342,7 +346,7 @@
 **Event Consumption**:
 - `transaction.created` → Increment usage counters
 - `refund.initiated` → Decrement usage counters
-- `limit.threshold.reached` → Alert user
+- `limits.threshold-reached` → Alert user
 
 ---
 
@@ -364,16 +368,16 @@ emitting events. That split is what keeps it removable: a deployment without Bon
 one `CASH` bucket per account and no promotional logic anywhere.
 
 **Event Production**:
-- `ValueGranted` — mints a `BONUS` bucket in the ledger (shared contract with Loyalty and Referral)
+- `rewards.value-granted` — mints a `BONUS` bucket in the ledger (shared contract with Loyalty and Referral)
 - `bonus.applied`
 - `bonus.revoked`
 - `bonus.expired`
-- `bonus.wagering.completed` → ledger transfers `BONUS` → `CASH`, making funds withdrawable
+- `bonus.wagering-completed` → ledger transfers `BONUS` → `CASH`, making funds withdrawable
 
 **Event Consumption**:
 - `transaction.created` → Check eligibility
 - `refund.initiated` → Revoke bonus if applicable
-- `recurring-payment.processed` → Loyalty rewards
+- `transaction.completed` → Loyalty rewards
 
 ---
 
@@ -415,13 +419,16 @@ bonus. Without that record there would be no correct way to reverse a mixed-buck
 
 **Event Production**:
 - `subscription.created`
-- `recurring-payment.due`
-- `recurring-payment.processed`
-- `recurring-payment.failed`
 - `subscription.suspended`
+- `subscription.cancelled`
 
 **Event Consumption**:
-- `recurring-payment.due` → Process payment (from Scheduler)
+- `scheduler.payment-due` → request a transaction from Transaction Service
+- `transaction.completed` → advance the billing cycle
+- `transaction.failed` → retry or suspend per policy
+
+Subscription produces no money-movement events. It requests transactions and reacts to the outcome;
+`transaction.completed` is the single event for money having moved (ADR-007).
 
 ---
 
@@ -429,12 +436,12 @@ bonus. Without that record there would be no correct way to reverse a mixed-buck
 **Role**: Points, tiers, and redemption
 
 Sells independently of Bonus. Awards points on qualifying events, manages tier thresholds, and
-converts redemptions into ledger value via `ValueGranted` (bucket type `LOYALTY`).
+converts redemptions into ledger value via `rewards.value-granted` (bucket type `LOYALTY`).
 
 **Database**: `rewards_db` (`loyalty_schema`)
 
-**Event Consumption**: `transaction.completed`, `ValueGranted`
-**Event Production**: `ValueGranted`, `loyalty.tier.changed`, `loyalty.points.redeemed`
+**Event Consumption**: `transaction.completed`, `rewards.value-granted`
+**Event Production**: `rewards.value-granted`, `loyalty.tier-changed`, `loyalty.points-redeemed`
 
 ---
 
@@ -442,12 +449,12 @@ converts redemptions into ledger value via `ValueGranted` (bucket type `LOYALTY`
 **Role**: User referral programme
 
 Sells independently of Bonus. Tracks referral links and attribution, and pays referral rewards as
-ledger value via `ValueGranted` (bucket type `REFERRAL`).
+ledger value via `rewards.value-granted` (bucket type `REFERRAL`).
 
 **Database**: `rewards_db` (`referral_schema`)
 
-**Event Consumption**: `user.registered`, `transaction.completed`
-**Event Production**: `ValueGranted`, `referral.completed`
+**Event Consumption**: `auth.user-registered`, `transaction.completed`
+**Event Production**: `rewards.value-granted`, `referral.completed`
 
 ---
 
@@ -466,7 +473,7 @@ queries an operational database — that is the whole point of the separation (A
 
 ### Security & Risk Services
 
-#### 7. **Auth Service** — CORE
+#### 7. **Auth Service** — CORE (thin adapter over Keycloak)
 **Role**: Authentication and authorization
 
 **Responsibilities**:
@@ -495,9 +502,9 @@ queries an operational database — that is the whole point of the separation (A
 - POST /fraud/analyze-transaction → Called by Transaction Service before transaction creation
 
 **Event Production**:
-- `fraud.analysis.completed`
-- `fraud.suspicion.detected`
-- `fraud.pattern.detected`
+- `fraud.analysis-completed`
+- `fraud.suspicion-detected`
+- `fraud.pattern-detected`
 
 ---
 
@@ -514,10 +521,10 @@ queries an operational database — that is the whole point of the separation (A
 **Database**: PostgreSQL
 
 **Event Production**:
-- `fraud.case.created`
-- `fraud.case.reviewed`
-- `account.locked`
-- `account.unlocked`
+- `risk.case-created`
+- `risk.case-reviewed`
+- `risk.account-locked`
+- `risk.account-unlocked`
 
 ---
 
@@ -566,7 +573,7 @@ queries an operational database — that is the whole point of the separation (A
 **Database**: PostgreSQL (job definitions)
 
 **Event Production**:
-- `recurring-payment.due`
+- `scheduler.payment-due`
 - `scheduled-job.executed`
 
 ---
@@ -681,7 +688,7 @@ Each service is a separate Git repository. Category per
    Event: transaction.created
    ↓
    ├─→ Limits Service: Increment daily usage
-   ├─→ Bonus Service (if deployed): Check cashback eligibility → Publish ValueGranted
+   ├─→ Bonus Service (if deployed): Check cashback eligibility → Publish rewards.value-granted
    ├─→ Audit Service: Log transaction
    └─→ Notification Service (if deployed): Send confirmation email
 
@@ -703,9 +710,9 @@ that aren't deployed simply don't appear — the producer is unaffected.
 1. Transaction Service → Fraud Detection (REST): Analyze
 2. Fraud Detection: Risk = HIGH, Decision = BLOCK
 3. Transaction Service: Create transaction (status: BLOCKED_FRAUD)
-4. Fraud Detection → Kafka: Publish fraud.suspicion.detected
+4. Fraud Detection → Kafka: Publish fraud.suspicion-detected
 
-   Event: fraud.suspicion.detected
+   Event: fraud.suspicion-detected
    ↓
    ├─→ Risk Management: Create fraud case
    ├─→ Auth Service: Require MFA on next login
@@ -716,7 +723,7 @@ that aren't deployed simply don't appear — the producer is unaffected.
 ### Example 3: Recurring Payment
 
 ```
-1. Scheduler Service (cron trigger) → Kafka: Publish recurring-payment.due
+1. Scheduler Service (cron trigger) → Kafka: Publish scheduler.payment-due
 2. Subscription Service consumes event
 3. Subscription Service → Transaction Service (REST): POST /transactions
       Subscription does NOT check limits or balance itself. It requests a transaction
@@ -730,7 +737,7 @@ that aren't deployed simply don't appear — the producer is unaffected.
    ↓
    ├─→ Vaullet: Settle the hold, write journal entries
    ├─→ Limits Service: Update monthly usage
-   ├─→ Bonus Service (if deployed): Apply loyalty cashback → ValueGranted
+   ├─→ Bonus Service (if deployed): Apply loyalty cashback → rewards.value-granted
    ├─→ Audit Service: Log transaction
    └─→ Notification Service (if deployed): Send payment confirmation
 ```
@@ -765,6 +772,9 @@ row-level scoping, and frequently mandatory under gambling licences with data-re
 
 A contract determines which modules that customer's cluster runs. Modules a customer did not buy are
 **not deployed at all** — no pod, no schema, no consumer group.
+
+The same per-customer values file also carries **currency** (operator-supplied, one per deployment,
+immutable after provisioning) and the **Auth adapter** (local identity vs. federated OIDC).
 
 ```
 Customer A (full)                    Customer B (core + Bonus only)
@@ -833,20 +843,38 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Invariant**: no sellable module depends on another, so all 128 module combinations are valid
   - **Consequence**: CI matrix collapses from 128 configurations to 9
 
+- [ADR-006: Authentication and Identity](docs/adr/006-authentication-and-identity.md) ✅
+  - **Decision**: **Keycloak deployed per cluster** as the identity provider; Auth Service is a thin
+    adapter, not an IdP. We do not write authentication.
+  - **Two modes, one mechanism**: `local` (Keycloak realm users) and `federated` (Keycloak identity
+    brokering to the operator's OIDC/SAML). Both issue identical tokens from the same realm, so
+    adapter invisibility is structural rather than maintained
+  - **Account anchor**: a minimal local `accounts` row keys the ledger, so an operator can replace
+    their IdP without touching immutable financial records
+  - **Under federation we store an ID mapping and nothing else** — no email, name or KYC data
+  - **Admin identity is local by default**, so fraud response survives an operator IdP outage
+
+- [ADR-007: Kafka Topic Naming and Event Schema Evolution](docs/adr/007-kafka-topics-and-event-schema-evolution.md) ✅
+  - **Topics**: `<domain>.<event-name>.v<major>`; dots separate segments, hyphens separate words
+  - **Topic-per-major**: additive changes stay put; breaking changes get a new topic and a migration window
+  - **`FULL_TRANSITIVE`** registry compatibility, because polyrepo deploys have no controlled order
+  - **Envelope** on every event: `event_id` for idempotency, correlation/causation for tracing
+  - **Keyed by `account_id`** so a grant always lands before the spend that draws on it
+  - **Money topics retained indefinitely** (tiered) — ADR-003's warehouse rebuild depends on it
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
 
 1. Define detailed API contracts (OpenAPI/Swagger)
 2. ~~Design database schemas per service~~ ✅ **Done** - See ADR-003
-3. Define Kafka topic naming conventions
+3. ~~Define Kafka topic naming conventions~~ ✅ **Done** - See ADR-007
 4. ~~Set up shared contracts repository~~ ✅ **Done** - See ADR-002
 5. Design error handling and retry strategies
 6. Plan disaster recovery and data backup
 7. ~~Decide on database-per-service vs shared database strategy~~ ✅ **Done** - See ADR-003 (Hybrid approach)
 8. Define monitoring and observability requirements
-9. Design authentication and authorization strategy — **next**, ADR-006 (local vs federated identity;
-   the ADR-005 Category 4 adapter)
+9. ~~Design authentication and authorization strategy~~ ✅ **Done** - See ADR-006
 10. ~~Decide balance consistency mechanism~~ ✅ **Done** - See ADR-004 (atomic reservations)
 11. ~~Decide module composition and deployment topology~~ ✅ **Done** - See ADR-005
 12. Define deployment strategy (CI/CD, blue-green, canary) and the per-customer GitOps repo layout

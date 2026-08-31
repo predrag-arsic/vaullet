@@ -49,9 +49,9 @@ Audit is the one deliberate exception, recorded here so it is not "rediscovered"
 
 ### Category 2: Platform Infrastructure (always deployed, never sold)
 
-Kafka, Redis, PostgreSQL, Elasticsearch, and the **Scheduler Service**.
+Kafka, Redis, PostgreSQL, Elasticsearch, **Keycloak** (ADR-006), and the **Scheduler Service**.
 
-Scheduler warrants explanation: it is event-producing and nobody buys a cron. But Subscription cannot function without it, since `recurring-payment.due` originates there. Classifying it as infrastructure rather than a module removes a sellable-to-sellable dependency — see the invariant below.
+Scheduler warrants explanation: it is event-producing and nobody buys a cron. But Subscription cannot function without it, since `scheduler.payment-due` originates there. Classifying it as infrastructure rather than a module removes a sellable-to-sellable dependency — see the invariant below.
 
 ### Category 3: Sellable Modules
 
@@ -67,7 +67,7 @@ Scheduler warrants explanation: it is event-producing and nobody buys a cron. Bu
 
 ### Category 4: Configurable Adapters
 
-Not on/off, but one port with multiple implementations selected per contract. Currently one: **Auth Service identity provider** — local credential store, or federation with the operator's OIDC provider (ADR-006). Both implementations satisfy the same internal contract, so no other service is aware of which is deployed.
+Not on/off, but one port with multiple implementations selected per contract. Currently one: **identity provider mode** — Keycloak realm users, or Keycloak identity-brokering to the operator's OIDC/SAML provider (ADR-006). Both issue identical tokens from the same realm, so no other service is aware of which is configured.
 
 This category exists because "which implementation" and "whether present" are different questions that would otherwise be conflated in the same configuration mechanism.
 
@@ -97,10 +97,18 @@ modules:
   reportingEtl: { enabled: false }
 
 auth:
-  provider: federated          # local | federated
-  oidc:
+  provider: federated          # local | federated (Keycloak broker configured or not)
+  broker:
     issuer: https://id.acme-betting.example
+
+platform:
+  currency: EUR                # ISO 4217; one per deployment (ADR-004)
+  minorUnits: 2
 ```
+
+`platform.currency` is operator-supplied and immutable for the life of the deployment. It is
+configuration in the same file as module enablement, but unlike a module it cannot be flipped later:
+changing it is a data migration, not a redeploy. See [ADR-004](004-atomic-balance-reservations.md).
 
 Rationale:
 
@@ -231,7 +239,7 @@ Violations are build failures, not review comments. The rule that keeps 128 comb
 
 ### Shared contracts
 
-Per ADR-002, `wallet-shared-contracts` defines every event type regardless of which modules are deployed. Vaullet consuming a `ValueGranted` event that no deployed module emits costs nothing; the topic simply stays empty. Contracts are a compile-time dependency and are unaffected by deployment topology.
+Per ADR-002, `wallet-shared-contracts` defines every event type regardless of which modules are deployed. Vaullet consuming a `rewards.value-granted` event that no deployed module emits costs nothing; the topic simply stays empty. Contracts are a compile-time dependency and are unaffected by deployment topology.
 
 ## References
 

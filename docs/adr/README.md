@@ -42,19 +42,19 @@ ADRs document important architectural decisions made during the development of t
 | [003](003-hybrid-database-strategy-with-analytics.md) | Hybrid Database Strategy with Separate Analytics Database | ✅ Accepted | 2026-08-27 |
 | [004](004-atomic-balance-reservations.md) | Atomic Balance Reservations in the Ledger | ✅ Accepted | 2026-08-27 |
 | [005](005-module-composition-and-deployment-topology.md) | Module Composition and Deployment Topology | ✅ Accepted | 2026-08-27 |
+| [006](006-authentication-and-identity.md) | Authentication and Identity | ✅ Accepted | 2026-08-27 |
+| [007](007-kafka-topics-and-event-schema-evolution.md) | Kafka Topic Naming and Event Schema Evolution | ✅ Accepted | 2026-08-27 |
 
 ## Upcoming Decisions
 
 Track decisions that need to be made:
 
 - [ ] Database schema design for Vaullet (append-only ledger)
-- [ ] Kafka topic naming conventions
-- [ ] Event schema versioning strategy
 - [ ] Polyrepo CI/CD pipeline approach
-- [ ] Authentication strategy: local vs federated identity (ADR-006)
+- [ ] **Safeguarding and float reconciliation** (segregated client funds, daily external reconciliation, break detection) — regulatory requirement for stored value
 - [ ] Service-to-service authentication (mutual TLS vs JWT)
 - [ ] API versioning strategy
-- [ ] Multi-currency support approach
+- [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
 - [ ] Data retention and archival policy
 
 ## References
