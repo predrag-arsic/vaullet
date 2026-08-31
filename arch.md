@@ -933,6 +933,17 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Keyed by `account_id`** so a grant always lands before the spend that draws on it
   - **Money topics retained indefinitely** (tiered) — ADR-003's warehouse rebuild depends on it
 
+- [ADR-008: Service-to-Service Authentication](docs/adr/008-service-to-service-authentication.md) 🟡 **Partially adopted**
+  - **Three layers**, because transport identity, authorization and user context are different questions
+  - **NetworkPolicy default-deny** → **Linkerd mTLS** on all internal traffic → **Keycloak service
+    tokens on the money path only** (reserve, adjustments, account freeze)
+  - **Linkerd over Istio** on cost: ~30 sidecars per cluster is 300–600MB vs 1.5–3GB, per customer
+  - **Kafka**: SASL/OAUTHBEARER against the same Keycloak, with ACLs generated from the deployed module set
+  - **User context**: service identity plus explicit `account_id`; forwarding user tokens to the ledger
+    was rejected, since a stolen token would bypass fraud, limits and the transaction record
+  - **Open**: whether to run a mesh at all. A mesh-free combination (CNI-level WireGuard encryption +
+    Keycloak tokens on every call) is under active consideration — Alternative 6
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
@@ -949,4 +960,4 @@ See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and h
 10. ~~Decide balance consistency mechanism~~ ✅ **Done** - See ADR-004 (atomic reservations)
 11. ~~Decide module composition and deployment topology~~ ✅ **Done** - See ADR-005
 12. Define deployment strategy (CI/CD, blue-green, canary) and the per-customer GitOps repo layout
-13. Define service-to-service authentication (mTLS vs JWT)
+13. ~~Define service-to-service authentication~~ ✅ **Done** - See ADR-008

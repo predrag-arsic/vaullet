@@ -21,8 +21,9 @@ ADRs document important architectural decisions made during the development of t
 
 1. **Proposed**: Decision is being discussed
 2. **Accepted**: Decision has been made and implemented
-3. **Deprecated**: Decision is outdated but not yet replaced
-4. **Superseded**: Replaced by a newer decision (link to new ADR)
+3. **Partially Accepted**: Some parts settled, others still under review — the ADR states which
+4. **Deprecated**: Decision is outdated but not yet replaced
+5. **Superseded**: Replaced by a newer decision (link to new ADR)
 
 ## How to Create an ADR
 
@@ -44,6 +45,7 @@ ADRs document important architectural decisions made during the development of t
 | [005](005-module-composition-and-deployment-topology.md) | Module Composition and Deployment Topology | ✅ Accepted | 2026-08-27 |
 | [006](006-authentication-and-identity.md) | Authentication and Identity | ✅ Accepted | 2026-08-27 |
 | [007](007-kafka-topics-and-event-schema-evolution.md) | Kafka Topic Naming and Event Schema Evolution | ✅ Accepted | 2026-08-27 |
+| [008](008-service-to-service-authentication.md) | Service-to-Service Authentication | 🟡 Partially Accepted — mesh vs mesh-free under review | 2026-08-27 |
 
 ## Upcoming Decisions
 
@@ -51,10 +53,11 @@ Track decisions that need to be made:
 
 - [ ] Database schema design for Vaullet (append-only ledger)
 - [ ] Polyrepo CI/CD pipeline approach
-- [ ] Service-to-service authentication (mutual TLS vs JWT)
 - [ ] API versioning strategy
 - [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
+- [ ] **ADR-008 Layer 2/3**: mesh (Linkerd) vs mesh-free (CNI encryption + Keycloak tokens everywhere) — Alternative 6
 - [ ] Data retention and archival policy
+- [ ] Human/operational access control (kubectl, database credentials, break-glass)
 
 ## References
 
