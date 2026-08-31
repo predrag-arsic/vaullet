@@ -763,6 +763,87 @@ and duplicated core logic. There is exactly one path money can move by, and ever
 - **Container**: Docker
 - **Orchestration**: Kubernetes
 
+## Market Context and Comparable Systems
+
+Vaullet is a **closed-loop stored-value wallet**: money enters by top-up, lives as a balance on an
+internal ledger, is spent inside one operator's ecosystem, and may be withdrawn. That is a different
+product from a payment gateway (moves money between parties, holds none) or an open-loop card
+programme (spends anywhere on a card network).
+
+Within iGaming this layer has a name — **PAM** (Player Account Management): the backend owning
+accounts, wallet, bonuses, KYC hooks, responsible-gambling controls and regulator-facing reporting.
+Vaullet is the wallet, ledger and bonus core of a PAM, without the game aggregation or sportsbook.
+
+### Comparable systems
+
+**Tier 1 — iGaming platform / PAM providers** (the direct market):
+
+| Product | Shape | Relation to Vaullet |
+|---|---|---|
+| **Playtech IMS** | Tier-1 licensed platform; operators license specific layers (IMS, Pulse CRM, aggregator, sportsbook) | Closest commercial analogue — modular licensing per contract is exactly ADR-005 |
+| **EveryMatrix** | Modular platform, operator keeps control of composition | Same modular thesis, broader scope (content aggregation) |
+| **SOFTSWISS** | White-label casino platform, strong crypto support | Turnkey rather than composable; wider scope |
+| **Pragmatic Solutions**, **BetConstruct**, **Digitain**, **Bede** | PAM / platform vendors | Same category, varying turnkey-vs-modular balance |
+
+**Tier 2 — Ledger-as-a-Service / wallet infrastructure** (the technical analogue):
+
+| Product | Shape | Relation to Vaullet |
+|---|---|---|
+| **Formance** | Open-source programmable double-entry ledger; explicit *programmable wallets* product with **holds** | The closest technical analogue to ADR-004 — same reservation/hold model, arrived at independently |
+| **TigerBeetle** | Purpose-built financial accounting database, native debit/credit schema, very high throughput | What ADR-004's Alternative 3 becomes at scale; a candidate to sit *under* Vaullet rather than beside it |
+| **Fragment**, **Twisp** | Ledger APIs | Ledger primitives without domain logic |
+| **Modern Treasury** | Payment operations + ledger | Broader ops scope, US bank-rail oriented |
+
+**Tier 3 — closed-loop wallets in other verticals** (adjacent markets, largely the same machinery):
+
+| Domain | Example | Fit |
+|---|---|---|
+| Game economies | **Xsolla**, **Tilia** | Strongest adjacent fit — "purchased currency" vs "earned, non-cashable currency" *is* the ADR-004 bucket model with `withdrawable` |
+| Retail loyalty | **Starbucks** app | Canonical closed-loop stored value: preload, earn, redeem |
+| Super-apps / delivery | Ride and delivery wallets | Top-up + credits + referral; the Referral and Loyalty modules map directly |
+| Marketplace payouts | Seller balances | Holds and rolling reserves map onto the reservation model |
+
+> **On named operator relationships**: the vendor landscape above is publicly documented; *which
+> operator brand runs on which platform* generally is not, changes with contract cycles, and is often
+> commercially confidential. Verify before citing any specific pairing externally.
+
+### Where Vaullet sits
+
+At the intersection of Tier 1 and Tier 2: **the ledger correctness of a Formance or TigerBeetle, with
+the bonus mechanics of an iGaming PAM, deployed single-tenant per operator.**
+
+Two design choices that looked like invention turn out to be established practice, which is
+reassuring rather than disappointing:
+
+- **Modular licensing per contract** (ADR-005) is how Playtech sells IMS today — operators license
+  the layers they want rather than a monolith.
+- **Holds against a double-entry ledger** (ADR-004) is exactly what Formance's programmable wallets
+  do. Arriving there independently, after finding the flaw in ADR-001, is a good sign the reasoning
+  was sound rather than novel.
+
+### Deliberately out of scope
+
+Vaullet is not, and does not attempt to be: an open-loop card issuer (scheme integration,
+settlement, chargebacks), a payment gateway or PSP (it consumes rails, it does not provide them), a
+KYC/AML vendor (the operator holds identity — ADR-006), an FX or remittance engine (one currency per
+deployment — ADR-004), or a game aggregator or sportsbook.
+
+### Known gap: safeguarding and float reconciliation
+
+Stored value means real money exists outside the system. If accounts hold €500k in aggregate, a real
+bank account holds €500k, and in most jurisdictions that money must be **safeguarded** — segregated
+from operating funds and reconciled against the customer ledger **at least once every business day**
+under FCA e-money rules, with segregation the method used by the large majority of firms.
+
+The architecture does not currently do this. ADR-004 reconciles the *projection against the journal* —
+internal consistency — but nothing reconciles the journal against the external float. There is no
+house/float account, no daily external reconciliation, and no break detection for the case where the
+ledger says €500,000.00 and the bank says €499,997.00.
+
+This is the largest remaining gap for production readiness — larger than service-to-service auth —
+because it is a licensing condition rather than an engineering preference, and it is the first thing
+a regulator or a reviewer with payments background asks about. Tracked as a pending ADR.
+
 ## Deployment Topology
 
 Vaullet is sold as a **single-tenant deployment**: each customer runs their own Kubernetes cluster
