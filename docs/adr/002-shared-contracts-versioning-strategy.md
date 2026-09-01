@@ -115,6 +115,13 @@ public class TransactionDTO {
 
 Requires coordinated upgrade across all services (planned migration).
 
+> **Scope correction (2026-09-01)**: the coordinated-upgrade rule above applies to **REST DTOs only**.
+> For **event schemas it is superseded by [ADR-007](007-kafka-topics-and-event-schema-evolution.md)**,
+> which rejects coordinated upgrades outright: in a polyrepo there is no controlled deploy order, so a
+> breaking event change gets a new topic (`<domain>.<event>.v2`) and a dual-publish migration window,
+> with `FULL_TRANSITIVE` registry compatibility making producer-first and consumer-first equally safe.
+> This ADR still governs the artifact and its semantic version; ADR-007 governs the wire.
+
 ## Consequences
 
 ### Positive Consequences

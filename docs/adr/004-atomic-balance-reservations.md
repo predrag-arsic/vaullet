@@ -223,7 +223,22 @@ COMMIT;
 
 Read and write are in the same transaction, on the same rows, in the same service. There is no window.
 
-**Deadlock safety**: every operation takes `account_balances` `FOR UPDATE` *first* and holds no other lock across a network call. Bucket rows are only ever touched while that account row is held, so two concurrent operations on the same account serialize on one row, and operations on different accounts never contend. Multi-row bucket updates cannot deadlock because they are always reached through the same single gate.
+**Deadlock safety — a rule for every write path, not just this one**: *every* operation that touches
+an account's buckets must take `account_balances FOR UPDATE` **first**, before reading or writing any
+bucket row, and must hold no other lock across a network call.
+
+This applies to reserve, settle, release, grant and the expiry sweeper alike. Bucket rows are only
+ever reached through that single gate, so two concurrent operations on one account serialize on one
+row, and operations on different accounts never contend.
+
+The rule exists because the paths naturally want opposite orders: reserve starts from the account and
+allocates down into buckets, while settle and grant start from a known bucket and roll up to the
+account. Left to their own logic, a reserve holding the account row and waiting on a bucket would
+deadlock against a settle holding that bucket and waiting on the account row — on the money path,
+under exactly the concurrency this ADR exists to handle. Postgres would detect and abort one, so it is
+a failed transaction rather than corruption, but it is entirely avoidable.
+
+Acquiring the account row first is therefore mandatory even where a path does not appear to need it.
 
 **Spend priority** is set by the granting module and is a business decision (typically: expiring-soonest promotional money first, cash last, so users don't forfeit bonuses). The ledger sorts; it does not choose.
 
@@ -235,15 +250,15 @@ Grants use `UNIQUE (grant_id)` on `balance_buckets` for the same reason — a re
 
 ### Grants (asynchronous)
 
-Bonus, Loyalty, and Referral each emit a common `rewards.value-granted` event (shared contract, per ADR-002). Vaullet consumes it and, in one transaction: insert a `balance_buckets` row, insert a `CREDIT` ledger entry, increment `account_balances.posted_balance`.
+Bonus, Loyalty, and Referral each emit a common `rewards.value-granted` event (shared contract, per ADR-002). Vaullet consumes it and, in one transaction: **take `account_balances FOR UPDATE`**, insert a `balance_buckets` row, insert a `CREDIT` ledger entry, increment `account_balances.posted_balance`.
 
 Grants are event-driven, not synchronous, which is what keeps all three modules independently removable — the rule from ADR-005 that optional functionality lives on the event side. Vaullet consuming an event type that no deployed module emits costs nothing.
 
 ### Settle and Release
 
-On `transaction.completed`, in one transaction: insert one `ledger_entries` row per allocated bucket, decrement `held_total` on those buckets and on the account, apply amounts to `posted_balance`, mark the reservation `SETTLED`. Idempotent via the unique index on `(transaction_id, bucket_id, direction)`.
+On `transaction.completed`, in one transaction: **take `account_balances FOR UPDATE` first**, then insert one `ledger_entries` row per allocated bucket, decrement `held_total` on those buckets and on the account, apply amounts to `posted_balance`, and mark the reservation `SETTLED`. Idempotent via the unique index on `(transaction_id, bucket_id, direction)`.
 
-On `transaction.failed` or cancellation: decrement `held_total` at both levels, mark `RELEASED`. No ledger entry — money that never moved leaves no journal record.
+On `transaction.failed` or cancellation: same lock first, then decrement `held_total` at both levels and mark `RELEASED`. No ledger entry — money that never moved leaves no journal record.
 
 ### Expiry
 
@@ -252,8 +267,15 @@ A sweeper releases abandoned holds:
 ```sql
 UPDATE reservations SET state = 'EXPIRED'
  WHERE state = 'HELD' AND expires_at < now()
- RETURNING reservation_id;   -- then release allocations, bucket and account held_total
+ RETURNING reservation_id, account_id;
+-- then, per account and one account at a time:
+--   BEGIN; SELECT ... FROM account_balances WHERE account_id = $1 FOR UPDATE;
+--   release allocations, decrement bucket and account held_total; COMMIT;
 ```
+
+The sweeper must lock **one account per transaction**, in the same account-first order as every other
+path. Batching several accounts into one transaction would acquire account rows in whatever order the
+sweep returned them, which is the one way this design can still deadlock against itself.
 
 Settlement uses `WHERE state = 'HELD'` and expiry uses `WHERE state = 'HELD' AND expires_at < now()`, so exactly one wins. If expiry wins, settlement affects zero rows and Vaullet publishes `ledger.settlement-rejected`; Transaction Service fails the transaction. With a 5-minute expiry against a sub-second happy path, this is a rare, loud, correct outcome rather than a silent overdraft.
 

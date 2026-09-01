@@ -39,8 +39,8 @@ We will implement **two identity adapters behind one internal contract**, select
 
 ### The internal contract
 
-**Auth Service always mints Vaullet's own short-lived internal access token, in both modes.** Every
-other service validates exactly one token format, against one JWKS, with one claim set:
+**Keycloak is the only token signer, in both modes.** Auth Service brokers; it never issues tokens
+itself. Every other service validates exactly one token format, against one JWKS, with one claim set:
 
 ```json
 {
@@ -300,7 +300,7 @@ platform is most attractive, and for whom user management is part of what they a
 ### Alternative 4: Build a bespoke Auth Service
 
 **Description**: Implement credential storage, MFA, session management and OIDC in Vaullet's own Auth
-Service. *This was the original decision in this ADR, revised on 2026-08-27.*
+Service.
 
 **Pros**: No third-party component per cluster; no upgrade cadence inherited; complete control of the
 token contract; one less stateful service to operate.
@@ -311,15 +311,15 @@ is a well-documented source of vulnerabilities in hand-rolled implementations, a
 differentiator. For a platform whose selling point is a bonus engine, engineering effort spent
 reimplementing an IdP is effort not spent on the product.
 
-**Why rejected**: The build-versus-buy question was decided by what is actually being sold. Vaullet
+**Why rejected**: The build-versus-buy question is decided by what is actually being sold. Vaullet
 competes on ledger correctness and bonus mechanics, not on identity. Keycloak's identity brokering
-also collapses the two adapters into one native mechanism, so the switch *removed* a component we
-would otherwise have had to keep honest.
+also collapses the two modes into one native mechanism, so buying *removes* a component we would
+otherwise have had to build and keep honest.
 
-**What made the switch cheap**: nothing outside the Auth boundary changed. The account anchor, local
-status enforcement, separation of duties and the claim contract all survived intact — which is the
-property the original version of this ADR argued was worth more than the build-versus-buy choice
-itself. That turned out to be correct, sooner than expected.
+**What keeps this reversible**: nothing outside the Auth boundary depends on the choice. The account
+anchor, local status enforcement, separation of duties and the claim contract are all ours regardless.
+If Keycloak ever stops fitting, it can be replaced without touching another service — and that
+property is worth more than the build-versus-buy answer itself.
 
 ---
 
@@ -418,13 +418,6 @@ Validate the internal token, check `accounts.status` (Redis-cached), enforce sco
 except Vaullet, which re-checks status inside the reserve transaction, because money movement warrants
 the extra read.
 
-### Migration note
-
-Nothing was built against the previous version of this ADR, so this revision costs a document edit.
-That is the second time in this repository that a decision was corrected before implementation
-(see [ADR-004](004-atomic-balance-reservations.md)) and the argument is the same: the cheapest place
-to change a decision is while it is still prose.
-
 ### Out of scope
 
 **Service-to-service authentication** (mTLS vs JWT between internal services) is a separate decision,
@@ -446,6 +439,6 @@ question, not an auth one. The auth half is settled here: Admin UI is role-scope
 
 ---
 
-**Date**: 2026-08-27
+**Date**: 2026-08-31
 **Author**: Predrag
 **Reviewers**: TBD
