@@ -967,11 +967,22 @@ Key architectural decisions are documented as **Architecture Decision Records (A
     part of what was sold
   - **CI enforces the ADR-004/005/007/008 invariants as build failures**, not review comments
 
+- [ADR-011: API Versioning and OpenAPI](docs/adr/011-api-versioning-and-openapi.md) ✅
+  - **Two regimes**: external APIs versioned for the long term (`/v1/` path, 12-month deprecation);
+    internal APIs guarantee only N-1 compatibility, which is what a rolling update needs
+  - **Additive within a major, new major for breaking** — the same rule as ADR-007's event schemas
+  - **OpenAPI generated from code** (honouring ADR-002's Java-as-source-of-truth), **committed as an
+    artifact and diffed in CI**; a breaking change fails the build via `oasdiff`
+  - **RFC 9457 Problem Details** with a stable error-code catalogue; `trace_id` is ADR-007's `correlation_id`
+  - **Cursor pagination, decimal-string money, mandatory `Idempotency-Key`** as platform-wide conventions
+  - **Outbound webhooks are a versioned, signed API**, not an afterthought
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
 
-1. Define detailed API contracts (OpenAPI/Swagger)
+1. Define detailed API contracts — **versioning and spec format done** (ADR-011); the external API's
+   *contents* remain to be designed
 2. ~~Design database schemas per service~~ ✅ **Done** - See ADR-003
 3. ~~Define Kafka topic naming conventions~~ ✅ **Done** - See ADR-007
 4. ~~Set up shared contracts repository~~ ✅ **Done** - See ADR-002
