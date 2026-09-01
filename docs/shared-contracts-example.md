@@ -188,7 +188,7 @@ public class TransactionService {
             .payload(dto)
             .build();
 
-        kafkaTemplate.send("transaction.created", event);
+        kafkaTemplate.send("transaction.created.v1", event);   // topic per ADR-007
 
         return dto;
     }
@@ -247,7 +247,7 @@ import com.wallet.contracts.events.TransactionCreatedEvent;
 @Service
 public class NotificationConsumer {
 
-    @KafkaListener(topics = "transaction.created")
+    @KafkaListener(topics = "transaction.created.v1")
     public void handleTransactionCreated(TransactionCreatedEvent event) {
         // Event schema is shared, type-safe
         String userId = event.getPayload().getUserId();

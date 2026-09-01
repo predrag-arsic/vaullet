@@ -24,7 +24,7 @@ Closes the item [ADR-006](006-authentication-and-identity.md) explicitly deferre
 
 ## Context
 
-Vaullet runs ~15 services in one Kubernetes cluster per customer, communicating over REST for
+Vaullet runs 14 services in one Kubernetes cluster per customer, communicating over REST for
 synchronous validation and Kafka for everything else. Nothing currently authenticates one service to
 another.
 
@@ -121,7 +121,7 @@ spec:
 
 **Why Linkerd rather than Istio.** Istio's policy engine is richer, and at multi-cluster scale that
 richness earns its keep. Here the deciding factor is the cost floor: roughly 30 sidecars per cluster
-(15 services × 2 replicas) is on the order of 1.5–3 GB of sidecar memory under Istio versus 300–600 MB
+(14 services × 2 replicas) is on the order of 1.5–3 GB of sidecar memory under Istio versus 300–600 MB
 under Linkerd — per customer, permanently. Vaullet needs mTLS and simple L7 authorization, which is
 exactly Linkerd's scope. Istio ambient mode removes the sidecar entirely and would change this
 calculation; it is worth revisiting when it has more operational history.
@@ -148,16 +148,21 @@ scope.
 | Caller → callee | Scope |
 |---|---|
 | Transaction Service → Vaullet `POST /reservations`, `DELETE /reservations` | `ledger:reserve` |
-| Admin UI → Vaullet manual adjustments | `ledger:adjust` |
 | Admin UI → Risk Management account freeze | `risk:act` |
 
-**Why not everywhere.** Applying this to all inter-service calls means token plumbing in fifteen
+> **Removed (2026-09-01)**: an earlier draft also granted `ledger:adjust` for "Vaullet manual
+> adjustments". No such endpoint exists — [ADR-004](004-atomic-balance-reservations.md)'s API is
+> reservations and balance only. Manual ledger adjustments are a real operational need (correcting
+> errors, goodwill credits, dispute resolution) but they have never been designed, and authorising an
+> operation that does not exist is worse than not authorising it. Tracked as a pending decision.
+
+**Why not everywhere.** Applying this to all inter-service calls means token plumbing in fourteen
 services to duplicate a guarantee Layer 2 already provides cryptographically. That is cost without
 benefit.
 
 **Why here.** A Linkerd `AuthorizationPolicy` is one YAML mistake away from being wrong, and the
 reserve endpoint is where that mistake commits money. An application-level check that fails
-independently of the mesh is worth its cost on exactly these three paths. The token also carries a
+independently of the mesh is worth its cost on exactly these paths. The token also carries a
 verifiable `azp` claim that goes into the audit record, which answers repudiation in a way network
 identity alone does not.
 
@@ -270,7 +275,7 @@ materially** and should be revisited once it has more production history.
 
 **Pros**: No mesh; no sidecars; no additional runtime component.
 
-**Cons**: Truststore and keystore configuration across fifteen services, rotation without restart, and
+**Cons**: Truststore and keystore configuration across fourteen services, rotation without restart, and
 no authorization layer at all — a certificate says *who*, never *what they may do*. It is the mesh's
 work done by hand, minus the mesh's benefits.
 
@@ -288,7 +293,7 @@ foundation at scale.
 **Cons**: Another stateful component per cluster, and it still needs something to enforce policy — in
 practice a mesh, which then supplies the identity anyway.
 
-**Why rejected**: Solves a heterogeneity problem Vaullet does not have. Fifteen services in one
+**Why rejected**: Solves a heterogeneity problem Vaullet does not have. Fourteen services in one
 Kubernetes cluster are exactly the case a mesh's built-in identity covers.
 
 ---
@@ -350,7 +355,7 @@ objection no longer holds.
 - **Failures are legible.** A 403 with a scope name beats an opaque mesh connection reset.
 
 **Cons**:
-- **Token plumbing in all fifteen services.** Largely Spring Boot configuration, but it is real work
+- **Token plumbing in all fourteen services.** Largely Spring Boot configuration, but it is real work
   and a new failure mode in every service rather than one.
 - **Keycloak becomes a dependency of all internal traffic**, not three endpoints. Token and JWKS
   caching make an outage degrade rather than break, but the exposure is much wider.
@@ -396,7 +401,7 @@ clients:
     scopes: [ "ledger:reserve" ]
   - clientId: admin-ui
     serviceAccountsEnabled: true
-    scopes: [ "ledger:adjust", "risk:act" ]
+    scopes: [ "risk:act" ]
 ```
 
 Declarative, applied by `keycloak-config-cli` alongside the realm configuration from ADR-006. Secrets
@@ -439,6 +444,6 @@ separately.
 
 ---
 
-**Date**: 2026-08-27
+**Date**: 2026-08-31
 **Author**: Predrag
 **Reviewers**: TBD

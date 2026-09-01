@@ -9,7 +9,7 @@ and provisioning made conditional on deployed modules (see [ADR-005](005-module-
 
 ## Context
 
-The Vaullet walleting system uses a polyrepo microservices architecture with 15 services plus an Admin UI. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
+The Vaullet walleting system uses a polyrepo microservices architecture with 14 services plus an Admin UI. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
 
 ### Key Requirements
 
@@ -582,7 +582,7 @@ schema.
 
 ### Alternative 1: Database Per Service (Full Separation)
 
-**Description**: Each of the 15 services gets its own dedicated database.
+**Description**: Each of the 14 services gets its own dedicated database.
 
 **Pros**:
 - Maximum isolation
@@ -999,7 +999,7 @@ in this evolution.
 
 ### Phase 1 (Current): Hybrid with PostgreSQL Reporting
 
-- 4 operational databases + Redis + Elasticsearch
+- 6 operational databases + `datawarehouse_db` + Redis + Elasticsearch
 - PostgreSQL for reporting
 - Simple Kafka consumer for ETL
 

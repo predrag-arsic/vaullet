@@ -666,7 +666,10 @@ Each service is a separate Git repository. Category per
 - `wallet-infrastructure` (Terraform, Helm umbrella chart, K8s manifests)
 - `wallet-contracts` (per-customer Helm values, GitOps)
 
-**Total**: 15 backend services + Admin UI.
+**Total**: 14 backend services + Admin UI.
+
+(6 core backend + 1 platform infrastructure + 7 sellable modules. The earlier figure of 15 counted
+Refund as a separate service, before it was folded into Transaction Service.)
 
 ## Data Flow Examples
 

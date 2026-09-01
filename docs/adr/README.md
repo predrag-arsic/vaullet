@@ -52,6 +52,7 @@ ADRs document important architectural decisions made during the development of t
 Track decisions that need to be made:
 
 - [ ] Database schema design for Vaullet (append-only ledger)
+- [ ] **Manual ledger adjustments** (corrections, goodwill credits, dispute resolution) — the need exists, the endpoint does not; surfaced in the 2026-09-01 review
 - [ ] Polyrepo CI/CD pipeline approach
 - [ ] API versioning strategy
 - [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
