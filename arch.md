@@ -947,6 +947,14 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Open**: whether to run a mesh at all. A mesh-free combination (CNI-level WireGuard encryption +
     Keycloak tokens on every call) is under active consideration — Alternative 6
 
+- [ADR-009: Payment Rails — Deposits, Withdrawals and Chargebacks](docs/adr/009-payment-rails-deposits-and-withdrawals.md) ✅
+  - **Deposits and withdrawals are transaction types** in Transaction Service — one money path, not a
+    second service that also moves money
+  - **Credit at `CAPTURED`**, not at authorization (money that may never arrive) or settlement (days late)
+  - **Withdrawals take an ADR-004 reservation at request**, and only `withdrawable` buckets are eligible
+  - **Chargebacks create a `DEBT` bucket, never a negative balance** — the overdraft `CHECK` stays absolute
+  - **PSP integration is a Category 4 adapter**; idempotency enforced by a primary key on the provider's event id
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps

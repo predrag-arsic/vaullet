@@ -151,7 +151,7 @@ CREATE TABLE account_balances (
 CREATE TABLE balance_buckets (
     bucket_id          UUID PRIMARY KEY,
     account_id         UUID          NOT NULL REFERENCES account_balances(account_id),
-    bucket_type        TEXT          NOT NULL CHECK (bucket_type IN ('CASH','BONUS','LOYALTY','REFERRAL')),
+    bucket_type        TEXT          NOT NULL CHECK (bucket_type IN ('CASH','BONUS','LOYALTY','REFERRAL','DEBT')),
     source_module      TEXT          NULL,        -- NULL for CASH
     grant_id           UUID          NULL,        -- idempotency anchor for the granting event
     posted_balance     NUMERIC(20,4) NOT NULL DEFAULT 0,

@@ -43,9 +43,10 @@ ADRs document important architectural decisions made during the development of t
 | [003](003-hybrid-database-strategy-with-analytics.md) | Hybrid Database Strategy with Separate Analytics Database | ✅ Accepted | 2026-08-27 |
 | [004](004-atomic-balance-reservations.md) | Atomic Balance Reservations in the Ledger | ✅ Accepted | 2026-08-27 |
 | [005](005-module-composition-and-deployment-topology.md) | Module Composition and Deployment Topology | ✅ Accepted | 2026-08-27 |
-| [006](006-authentication-and-identity.md) | Authentication and Identity | ✅ Accepted | 2026-08-27 |
+| [006](006-authentication-and-identity.md) | Authentication and Identity | ✅ Accepted | 2026-08-31 |
 | [007](007-kafka-topics-and-event-schema-evolution.md) | Kafka Topic Naming and Event Schema Evolution | ✅ Accepted | 2026-08-27 |
-| [008](008-service-to-service-authentication.md) | Service-to-Service Authentication | 🟡 Partially Accepted — mesh vs mesh-free under review | 2026-08-27 |
+| [008](008-service-to-service-authentication.md) | Service-to-Service Authentication | 🟡 Partially Accepted — mesh vs mesh-free under review | 2026-08-31 |
+| [009](009-payment-rails-deposits-and-withdrawals.md) | Payment Rails — Deposits, Withdrawals and Chargebacks | ✅ Accepted | 2026-09-01 |
 
 ## Upcoming Decisions
 
@@ -57,6 +58,7 @@ Track decisions that need to be made:
 - [ ] API versioning strategy
 - [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
 - [ ] **ADR-008 Layer 2/3**: mesh (Linkerd) vs mesh-free (CNI encryption + Keycloak tokens everywhere) — Alternative 6
+- [ ] PSP settlement matching (provider reports vs captured deposits)
 - [ ] Data retention and archival policy
 - [ ] Human/operational access control (kubectl, database credentials, break-glass)
 
