@@ -955,6 +955,18 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Chargebacks create a `DEBT` bucket, never a negative balance** — the overdraft `CHECK` stays absolute
   - **PSP integration is a Category 4 adapter**; idempotency enforced by a primary key on the provider's event id
 
+- [ADR-010: Polyrepo CI/CD and GitOps Delivery](docs/adr/010-polyrepo-cicd-and-gitops-delivery.md) ✅
+  - **Build on push, deploy on commit** — a service repo never deploys; its pipeline commits an image
+    tag to `wallet-gitops`, and Argo CD reconciles from there
+  - **One reusable GitHub workflow, fourteen callers** — a security step ships everywhere by bumping one tag
+  - **Argo CD per customer cluster, pull-based**, never hub-and-spoke: no inbound vendor access into a
+    licensed operator's environment
+  - **Immutable image tags** (`sha-<short>`), cosign-signed and verified on admission, so `git revert`
+    is a real rollback
+  - **Auto-deploy to dev/staging; customer production is a per-customer PR** — a deployed version is
+    part of what was sold
+  - **CI enforces the ADR-004/005/007/008 invariants as build failures**, not review comments
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
@@ -970,5 +982,5 @@ See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and h
 9. ~~Design authentication and authorization strategy~~ ✅ **Done** - See ADR-006
 10. ~~Decide balance consistency mechanism~~ ✅ **Done** - See ADR-004 (atomic reservations)
 11. ~~Decide module composition and deployment topology~~ ✅ **Done** - See ADR-005
-12. Define deployment strategy (CI/CD, blue-green, canary) and the per-customer GitOps repo layout
+12. ~~Define deployment strategy and the per-customer GitOps repo layout~~ ✅ **Done** - See ADR-010
 13. ~~Define service-to-service authentication~~ ✅ **Done** - See ADR-008
