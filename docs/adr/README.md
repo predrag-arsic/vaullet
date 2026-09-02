@@ -69,19 +69,27 @@ Nothing in the reviewed set is now known to contradict anything else.
 
 ## Upcoming Decisions
 
-Track decisions that need to be made:
+Decisions that still need an ADR. Full detail, plus the contradictions, accepted gaps and deferred
+re-evaluations that are not decisions in their own right, is in **[TODO.md](TODO.md)**.
 
-- [ ] **Manual ledger adjustments** (corrections, goodwill credits, dispute resolution) — the need exists, the endpoint does not; surfaced in the 2026-09-01 review
-- [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
-- [ ] PSP settlement matching (provider reports vs captured deposits)
-- [ ] Data retention and archival policy
-- [ ] Human/operational access control (kubectl, database credentials, break-glass)
+- [ ] **D1 · Manual ledger adjustments** ⭐ (corrections, goodwill credits, dispute resolution) — the controls are already written against it in ADR-006 and ADR-008; the operation is not designed
+- [ ] **D2** · Human/operational access control (kubectl, database credentials, break-glass)
+- [ ] **D3** · Data retention and archival policy
+- [ ] **D4** · PSP settlement matching (provider reports vs captured deposits)
+- [ ] **D5** · Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
+- [ ] **D6** · Disaster recovery and backup — `vaullet_db` has no recovery story
+- [ ] **D7** · Platform-wide observability
+- [ ] **D8** · Operator reporting surface (dashboard vs API vs widgets)
+
+TODO.md also tracks four items (**B1–B4**) that are *not* new decisions but contradictions between
+accepted ones, and must be fixed before the code they touch is written.
 
 Vaullet's ledger schema is **not** on this list: it is specified in [ADR-004](004-atomic-balance-reservations.md)
 and is ready to implement.
 
 ## References
 
+- [Open Items register](TODO.md) — everything unresolved, with IDs
 - [ADR Template](template.md)
 - [Architecture Overview](../../arch.md)
 - [GitHub - ADR Tools](https://github.com/npryce/adr-tools)
