@@ -3,6 +3,8 @@
 ## Status
 
 **Accepted** (2026-08-27)
+**Revised** (2026-09-02) — schemas are authored, not generated from Java (ADR-002); topic inventory
+extended with the events introduced by ADRs 004 and 009
 
 Extends [ADR-002](002-shared-contracts-versioning-strategy.md), which versions the shared-contracts
 *artifact* but says nothing about the wire.
@@ -161,10 +163,20 @@ publish time rather than a reviewer catching them.
 
 ### 5. Format: JSON Schema
 
-JSON on the wire, JSON Schema in the registry.
+JSON on the wire, JSON Schema in the registry — and **the schema is authored, not derived**.
 
-ADR-002 already generates TypeScript from Java DTOs for the frontend; JSON keeps one representation
-end to end. Avro is more compact and has the better registry story, but its TypeScript support is
+`schemas/<domain>/<topic>.json` in `wallet-shared-contracts` is the contract; the Java and TypeScript
+event types are generated from it ([ADR-002](002-shared-contracts-versioning-strategy.md), *Two sources
+of truth*). This follows directly from the argument this ADR is built on: events outlive the code that
+produced them, money topics are retained indefinitely, and a contract that outlives every binding must
+not be defined by one of them. Generating the schema *from* a Java class would also make wire
+compatibility an accident of refactoring — rename a field, regenerate, and the registry is asked to
+accept a break nobody wrote down. Authoring it puts the break in a pull request instead.
+
+REST DTOs keep Java as their source of truth; they ship with the controller that serves them and do
+not have this problem.
+
+JSON keeps one representation end to end. Avro is more compact and has the better registry story, but its TypeScript support is
 weak, and at >1000 TPS the payload-size difference is not the constraint. Debuggability — reading a
 message off a topic during an incident without tooling — matters more at this scale.
 
@@ -210,7 +222,22 @@ false. Tiered storage (local SSD hot, object storage cold) makes indefinite rete
 the alternative — sourcing rebuilds from operational databases — reintroduces exactly the coupling
 ADR-003 separated them to avoid.
 
-### 9. Retry and dead letters
+### 9. Topics introduced after this ADR
+
+Later decisions add topics; they follow the rule above rather than amending it, and are listed here so
+the inventory stays in one place:
+
+| Topic | Introduced by | Notes |
+|---|---|---|
+| `deposit.initiated.v1` · `deposit.captured.v1` · `deposit.failed.v1` | [ADR-009](009-payment-rails-deposits-and-withdrawals.md) | Money movement; `deposit.captured.v1` is what Bonus consumes for deposit-match promotions |
+| `withdrawal.requested.v1` · `withdrawal.approved.v1` · `withdrawal.confirmed.v1` · `withdrawal.failed.v1` | ADR-009 | Money movement |
+| `chargeback.received.v1` · `chargeback.resolved.v1` | ADR-009 | Money movement; produces the `DEBT` bucket |
+| `ledger.hold-expired.v1` | [ADR-004](004-atomic-balance-reservations.md) | A reservation released without capture. For a long two-phase hold this is a business event the operator must be told about, not cleanup noise |
+
+The `deposit.*`, `withdrawal.*` and `chargeback.*` domains are money movement for retention purposes
+(§8) and key on `account_id` (§6).
+
+### 10. Retry and dead letters
 
 `<topic>.retry` (delayed redelivery, exponential backoff, capped at 5 attempts) and `<topic>.dlq`.
 
@@ -342,7 +369,8 @@ could register an incompatible one at 3am.
 
 ### CI enforcement
 
-1. Every event class in `wallet-shared-contracts` maps to a registered subject — fail the build otherwise
+1. Every schema under `schemas/` maps to a registered subject, and every generated event class maps
+   back to a schema — fail the build otherwise. A hand-edited generated file fails the same check
 2. Schema compatibility checked against `FULL_TRANSITIVE` before publish
 3. Topic names linted against `^[a-z]+\.[a-z][a-z-]*\.v[0-9]+$`
 4. Every consumer of a state-changing event has a durable dedupe on `event_id` — asserted by an

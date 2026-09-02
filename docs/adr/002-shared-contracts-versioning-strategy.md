@@ -3,6 +3,8 @@
 ## Status
 
 **Accepted** (2026-08-27)
+**Revised** (2026-09-02) — per-domain artifacts rather than one; event schemas are authored, not
+generated from Java
 
 ## Context
 
@@ -35,53 +37,122 @@ Example: Adding `merchantCategory` field to transactions requires changes across
 
 ## Decision
 
-We will create a **shared contracts repository** (`wallet-shared-contracts`) that publishes two artifacts:
+We will create a **shared contracts repository** (`wallet-shared-contracts`) publishing **one artifact
+pair per domain**, in both Java and TypeScript.
 
-1. **Maven artifact** for Java services: `com.wallet:shared-contracts:x.y.z`
-2. **NPM package** for frontends: `@wallet/contracts:x.y.z`
+### One repository, several artifacts
+
+A single fat `shared-contracts` jar consumed by all fourteen services is the coupling
+[ADR-005](005-module-composition-and-deployment-topology.md) exists to remove. ADR-005's invariant —
+no sellable module depends on another sellable module — buys 128 valid deployment combinations by
+construction, and it holds at *runtime* whatever this repository does, because the wire is events. But
+with one artifact the *build* graph is a hub: a Bonus-only field bumps a version that Limits, Audit and
+Fraud Detection all consume, and every service that wants the next unrelated fix inherits the churn.
+Nothing breaks; everything moves together, which is the property polyrepo was chosen to avoid.
+
+So the repository publishes per-domain artifacts:
+
+| Artifact | Contains | Typical consumers |
+|---|---|---|
+| `contracts-common` | `Money`, `Problem`, `Cursor`, the ADR-007 envelope, shared enums | everything |
+| `contracts-ledger` | reserve/settle DTOs, `ledger.*` events | Vaullet, Transaction |
+| `contracts-transaction` | transaction + refund DTOs, `transaction.*`, `refund.*` events | Transaction, Fraud, Limits, Audit |
+| `contracts-payments` | deposit/withdrawal/chargeback DTOs and events (ADR-009) | Transaction, PSP adapters, Bonus |
+| `contracts-rewards` | `rewards.value-granted`, `bonus.*`, `loyalty.*`, `referral.*` | Bonus, Loyalty, Referral, Vaullet |
+| `contracts-identity` | account anchor, `auth.*`, `risk.*` events | Auth, Risk Management, Admin UI |
+
+Published as `com.wallet:contracts-<domain>:x.y.z` and `@wallet/contracts-<domain>`. A service depends
+on the domains it actually speaks — usually two or three. `contracts-common` is the only artifact
+everyone shares, and it is deliberately small enough to be stable.
+
+This is one repository, one pipeline and one release process; only the published unit is split. The
+polyrepo cost of separate contract repositories (cross-repo choreography for a single logical change)
+is not worth paying, and is not paid here.
+
+### Two sources of truth, because the two contracts differ in lifetime
+
+| Contract | Source of truth | Generated |
+|---|---|---|
+| **REST DTOs** | Java classes | TypeScript, and the OpenAPI spec (ADR-011) |
+| **Kafka event schemas** | **Authored JSON Schema** | Java classes and TypeScript |
+
+For REST, Java-as-source is right and this ADR's original reasoning stands: the DTO and the controller
+that serves it ship together, and a change to either without the other is a compile error.
+
+For events it is inverted, and this is a correction. [ADR-007](007-kafka-topics-and-event-schema-evolution.md)
+makes the JSON Schema registered under `FULL_TRANSITIVE` the actual wire contract, and its central
+argument is that events outlive the code that wrote them — a field removed in `v3` still exists in
+retained messages, and money topics are retained indefinitely. A contract that outlives every binding
+should not be *defined by* one of those bindings. Generating the schema from a Java class also makes
+compatibility an emergent property of a refactor: rename a field, regenerate, and the registry is asked
+to accept a breaking change nobody wrote down.
+
+Authoring the schema makes the reviewable artifact the contract itself. `schemas/<domain>/<topic>.json`
+is a file in a pull request; the Java and TypeScript types are build output.
 
 ### Key Principles
 
 1. **Backward compatibility by default**: New fields are always optional (`@Nullable`)
-2. **Semantic versioning**:
+2. **Semantic versioning**, per artifact:
    - MAJOR: Breaking changes (field removal, type change)
    - MINOR: New optional fields, new events
    - PATCH: Documentation, bug fixes
-3. **Automated TypeScript generation**: Java DTOs are source of truth, TypeScript generated
-4. **DTO suffix stripping**: `TransactionDTO.java` → `Transaction.ts` for frontends
-5. **Separate Java/TS versioning**: Both published with same version number for consistency
+3. **REST DTOs**: Java is the source of truth, TypeScript generated
+4. **Event schemas**: JSON Schema is the source of truth, Java and TypeScript generated
+5. **DTO suffix stripping**: `TransactionDTO.java` → `Transaction.ts` for frontends
+6. **Java and TS share a version number** within a domain, so `contracts-ledger` 2.3.0 means the same
+   thing in both ecosystems. Domains version independently of each other
 
 ### Repository Structure
 
 ```
 wallet-shared-contracts/
-├── src/main/java/com/wallet/contracts/
-│   ├── dto/                  # Request/Response DTOs
-│   ├── events/               # Kafka event schemas
-│   └── enums/                # Shared enums
-├── scripts/
-│   └── generate-typescript.sh
-├── dist/typescript/          # Generated TypeScript (gitignored)
-├── pom.xml                   # Maven build
-├── package.json              # NPM publish
+├── schemas/                          # AUTHORED — the wire contract (ADR-007)
+│   ├── common/envelope.json
+│   ├── ledger/ledger.entry-recorded.v1.json
+│   ├── rewards/rewards.value-granted.v1.json
+│   └── ...
+├── contracts-common/
+│   ├── src/main/java/com/wallet/contracts/common/    # AUTHORED — shared REST types
+│   └── pom.xml
+├── contracts-ledger/
+│   ├── src/main/java/com/wallet/contracts/ledger/    # AUTHORED — REST DTOs
+│   ├── target/generated-sources/events/              # GENERATED from schemas/ledger
+│   └── pom.xml
+├── contracts-transaction/  contracts-payments/
+├── contracts-rewards/      contracts-identity/
+├── dist/typescript/<domain>/         # GENERATED (gitignored); one NPM package per domain
+├── pom.xml                           # aggregator
 └── .github/workflows/
-    └── publish.yml           # Auto-publish on tag
+    └── publish.yml                   # generate → verify → register schemas → publish changed domains
 ```
+
+Only `schemas/` and the `dto/` trees are hand-written. Everything under a `generated-sources` or
+`dist` path is build output, and CI fails if a generated file has been edited by hand.
 
 ### Publishing Workflow
 
 ```
-1. Developer makes changes (e.g., add optional field)
-2. Update version in pom.xml and package.json
-3. Commit changes
-4. Create Git tag: v2.2.0
-5. CI/CD pipeline (GitHub Actions):
-   ├─ Run tests
-   ├─ Generate TypeScript from Java
-   ├─ Publish Maven artifact to Artifactory/Maven Central
-   └─ Publish NPM package to NPM registry
-6. Services upgrade at their own pace
+1. Developer edits an authored file:
+     schemas/<domain>/<topic>.json   (an event — the wire contract)
+     or a DTO class                  (a REST type)
+2. Update the version of the affected domain module only
+3. Commit; open a PR
+4. CI on the PR:
+   ├─ Generate Java + TypeScript from schemas/
+   ├─ Fail if any generated file differs from a committed one (no hand-edited output)
+   ├─ Check every changed schema against the registry under FULL_TRANSITIVE
+   └─ Run compatibility tests (old consumer × new payload, new consumer × old payload)
+5. Merge, then tag: contracts-ledger-v2.2.0
+6. CI on the tag:
+   ├─ Register the schemas for that domain (runtime never registers — ADR-007)
+   ├─ Publish com.wallet:contracts-ledger to GHCR Maven
+   └─ Publish @wallet/contracts-ledger to the NPM registry
+7. Services upgrade the domains they consume, at their own pace
 ```
+
+Only the domains touched by a change are versioned and published. A rewards-only field never produces
+a new `contracts-ledger`.
 
 ### Versioning Rules
 
@@ -126,20 +197,29 @@ Requires coordinated upgrade across all services (planned migration).
 
 ### Positive Consequences
 
-✅ **Single source of truth**: DTOs defined once in shared-contracts
+✅ **Single source of truth**: each contract defined once — REST DTOs in Java, event schemas in JSON Schema
 ✅ **Type safety**: Both Java and TypeScript have compile-time checks
 ✅ **Independent deployments**: Services upgrade contracts independently
 ✅ **Gradual rollout**: New fields can be adopted incrementally
 ✅ **Frontend-friendly**: Clean TypeScript types without DTO suffix
 ✅ **Automated generation**: TypeScript generated from Java (no manual sync)
 ✅ **Version clarity**: Semantic versioning makes breaking changes explicit
-✅ **Industry standard**: Used by Stripe, Twilio, AWS SDK
+✅ **Blast radius matches the change**: a rewards field bumps `contracts-rewards` and nothing else, so
+   the build graph stops being a hub that every service upgrades through
+✅ **The wire contract is reviewable**: an event schema change is a diff in an authored `.json` file,
+   not an emergent consequence of renaming a Java field
 
 ### Negative Consequences
 
 ⚠️ **Backward compatibility overhead**: Must design fields as optional initially
 ⚠️ **Multiple versions in flight**: Services may use different contract versions temporarily
-⚠️ **Build complexity**: Need Maven plugin + npm scripts for dual publishing
+⚠️ **Build complexity**: Need Maven plugin + npm scripts for dual publishing, now across six modules
+⚠️ **Two generators, two directions**: JSON Schema → Java/TS for events, Java → TS for REST DTOs. The
+   split is principled but it is a thing a newcomer must be told, and the build enforces it rather than
+   the convention
+⚠️ **A domain boundary can be wrong**: an artifact split that cuts across a real coupling produces
+   circular dependencies between contract modules. `contracts-common` absorbs anything genuinely shared;
+   an architecture test forbids a cycle
 ⚠️ **Versioning discipline**: Team must follow semantic versioning strictly
 ⚠️ **TypeScript generation limitations**: Complex Java types may not map perfectly
 
@@ -188,7 +268,12 @@ Requires coordinated upgrade across all services (planned migration).
 - Two-way sync (code → spec → code) is complex
 - Team more familiar with Java than OpenAPI
 
-**Why Rejected**: Java DTOs are more expressive. Team prefers Java as source of truth.
+**Why Rejected, for REST**: Java DTOs are more expressive, and the DTO ships with the controller that
+serves it. **Partially adopted for events**: the reasoning above is about REST request/response types,
+where the schema and its handler are deployed together. Events are not like that — they are read years
+later by code that did not exist when they were written — so for the event half this ADR now does
+exactly what this alternative describes, with JSON Schema rather than OpenAPI (ADR-007 §5). See *Two
+sources of truth* in the Decision.
 
 ---
 
@@ -227,6 +312,32 @@ Requires coordinated upgrade across all services (planned migration).
 - Tooling complexity (Nx, Bazel)
 
 **Why Rejected**: Polyrepo strategy already chosen. This ADR provides solution within that constraint.
+
+---
+
+### Alternative 5: One artifact for every domain
+
+**Description**: The original form of this ADR — a single `com.wallet:shared-contracts` jar and one
+`@wallet/contracts` package, consumed by all fourteen services.
+
+**Pros**:
+- Simplest possible build: one version, one tag, one publish
+- No domain boundaries to get wrong, and no risk of a cycle between contract modules
+- A consumer can never be on mismatched versions of two contract artifacts
+
+**Cons**:
+- Every service upgrades through the same version stream; an unrelated change is still a version bump
+  the whole fleet eventually takes
+- The build graph becomes a hub, which is the shape [ADR-005](005-module-composition-and-deployment-topology.md)
+  removes at runtime and polyrepo removes at the repository level
+- A module a customer did not buy still ships its types into every service's classpath
+- The version number stops carrying information: `2.9.0` says something changed somewhere
+
+**Why Rejected**: the coupling is real and it lands precisely where this architecture spends the most
+effort avoiding it. The mitigation — split the published unit, keep one repository — costs an
+aggregator `pom.xml` and buys a blast radius that matches the change. The mismatched-version risk is
+answered by `contracts-common` being the only cross-domain dependency and by the compatibility tests
+already required here.
 
 ## Implementation Notes
 
@@ -334,12 +445,20 @@ export enum TransactionStatus {
 
 ### Maven Configuration (pom.xml)
 
+One domain module; the aggregator `pom.xml` lists all six and holds the shared plugin configuration.
+
 ```xml
 <project>
     <groupId>com.wallet</groupId>
-    <artifactId>shared-contracts</artifactId>
+    <artifactId>contracts-ledger</artifactId>
     <version>2.2.0</version>
     <packaging>jar</packaging>
+
+    <parent>
+        <groupId>com.wallet</groupId>
+        <artifactId>contracts-parent</artifactId>
+        <version>1.0.0</version>
+    </parent>
 
     <dependencies>
         <dependency>
@@ -407,21 +526,24 @@ export enum TransactionStatus {
 
 ```json
 {
-  "name": "@wallet/contracts",
+  "name": "@wallet/contracts-ledger",
   "version": "2.2.0",
-  "description": "Shared contracts for Vaullet walleting system",
-  "main": "dist/typescript/index.ts",
-  "types": "dist/typescript/index.ts",
+  "description": "Ledger contracts for the Vaullet walleting system",
+  "main": "dist/typescript/ledger/index.ts",
+  "types": "dist/typescript/ledger/index.ts",
   "files": [
-    "dist/typescript/**/*"
+    "dist/typescript/ledger/**/*"
   ],
+  "peerDependencies": {
+    "@wallet/contracts-common": "^1.0.0"
+  },
   "scripts": {
     "build": "mvn clean package",
     "prepublishOnly": "npm run build"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/wallet/shared-contracts.git"
+    "url": "https://github.com/vaullet/wallet-shared-contracts.git"
   },
   "keywords": ["wallet", "contracts", "dto", "events"],
   "author": "Wallet Team",
@@ -490,11 +612,16 @@ jobs:
 ### Service Upgrade Example
 
 ```java
-// wallet-transaction-service/pom.xml
+// wallet-transaction-service/pom.xml — only the domains this service speaks
 <dependency>
     <groupId>com.wallet</groupId>
-    <artifactId>shared-contracts</artifactId>
+    <artifactId>contracts-transaction</artifactId>
     <version>2.2.0</version>  <!-- Upgraded from 2.1.0 -->
+</dependency>
+<dependency>
+    <groupId>com.wallet</groupId>
+    <artifactId>contracts-ledger</artifactId>
+    <version>2.0.3</version>  <!-- Unaffected by the change above -->
 </dependency>
 
 // wallet-transaction-service/TransactionService.java
@@ -522,12 +649,13 @@ public class TransactionService {
 // wallet-web-frontend/package.json
 {
   "dependencies": {
-    "@wallet/contracts": "^2.2.0"
+    "@wallet/contracts-transaction": "^2.2.0",
+    "@wallet/contracts-common": "^1.0.0"
   }
 }
 
 // wallet-web-frontend/src/components/TransactionList.tsx
-import { Transaction, TransactionStatus } from '@wallet/contracts';
+import { Transaction, TransactionStatus } from '@wallet/contracts-transaction';
 
 interface Props {
   transactions: Transaction[];
@@ -551,7 +679,7 @@ export const TransactionList: React.FC<Props> = ({ transactions }) => {
 ### Backward Compatibility Testing
 
 ```java
-// shared-contracts/src/test/java/CompatibilityTest.java
+// contracts-ledger/src/test/java/CompatibilityTest.java
 @Test
 public void testBackwardCompatibility_TransactionDTO() {
     // Old JSON (from v2.1.0 service)
@@ -645,15 +773,17 @@ Alerts:
 
 **Current**: No shared contracts (or ad-hoc sharing)
 
-**Migration steps**:
-1. **Week 1**: Create `wallet-shared-contracts` repo
-2. **Week 2**: Extract DTOs from Transaction Service (v1.0.0)
-3. **Week 3**: Publish Maven + NPM packages
-4. **Week 4**: Migrate Transaction Service to use shared-contracts
-5. **Week 5**: Migrate Vaullet Service
-6. **Ongoing**: Migrate remaining services one by one
+**Migration steps**: there is nothing to migrate — no service exists yet. The build order is therefore
+the greenfield one:
 
-No big-bang migration required. Services can migrate incrementally.
+1. `contracts-common` — the ADR-007 envelope, `Money`, `Problem`, shared enums
+2. `schemas/ledger/*.json` and `contracts-ledger` — the first domain, because the ledger is the first
+   service (ADR-004)
+3. The generator and the CI gates (generated-file drift, `FULL_TRANSITIVE` registry check) **before**
+   the second domain, so the discipline exists while there is still only one thing to fix
+4. Remaining domains as their services are built
+
+Domains are added, not migrated to. A service consumes the domains it speaks from its first commit.
 
 ## Future Considerations
 

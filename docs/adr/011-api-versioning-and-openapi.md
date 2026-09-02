@@ -3,6 +3,8 @@
 ## Status
 
 **Accepted** (2026-09-01)
+**Revised** (2026-09-02) — generation is per module fragment, reconciling code-first with ADR-012's
+composed specification
 
 ## Context
 
@@ -104,10 +106,37 @@ chart per customer and versions do not drift far.
 Breaking an internal API is therefore a two-release operation: add the new form in release N, remove
 the old in N+1. The same expand–contract discipline ADR-010 requires of database migrations.
 
-### 5. OpenAPI: generated from code, committed as an artifact, diffed in CI
+### 5. OpenAPI: generated from code, per module fragment, committed as an artifact, diffed in CI
 
 Code-first via springdoc-openapi, from annotated controllers and the ADR-002 shared-contract DTOs.
 This honours ADR-002 rather than reopening it.
+
+**Generation is per fragment, not per service.** [ADR-012](012-external-api-surface.md) composes each
+customer's specification from `core.v1.yaml` plus one fragment per module they bought. Those two facts
+only fit together if the *generator* emits fragments, so it does: springdoc is configured with one
+`GroupedOpenApi` per module, selected by the controller package.
+
+```java
+@Bean GroupedOpenApi core()  { return GroupedOpenApi.builder()
+        .group("core").packagesToScan("com.wallet.api.core").build(); }
+@Bean GroupedOpenApi bonus() { return GroupedOpenApi.builder()
+        .group("bonus").packagesToScan("com.wallet.api.bonus").build(); }
+```
+
+Each group generates one file — `api/core.v1.yaml`, `api/modules/bonus.v1.yaml` — and each is
+committed and diffed independently by the gate below. Shared schema objects (`Money`, `Bucket`,
+`Problem`, `Cursor`) come from `contracts-common` and are emitted once into `api/common.v1.yaml`, which
+the fragments `$ref` rather than inlining; springdoc is pointed at it so the same Java type never
+produces two definitions.
+
+Nothing is hand-authored, and nothing is composed at generation time. Composition is a build step in
+the ADR-010 pipeline that selects fragments per customer — it never rewrites one, which is why a
+fragment-level compatibility check is sufficient for the composed result.
+
+**The package boundary is therefore load-bearing**: a controller in the wrong package puts an endpoint
+in the wrong fragment and ships a module to a customer who did not buy it. An architecture test asserts
+that every controller lives under the package matching its module, and that a core controller
+references no module type.
 
 Code-first has one well-known failure: the public contract changes silently when someone edits a
 class. The fix is to stop treating the spec as a build output:
@@ -133,9 +162,17 @@ review discipline as code.
 
 ### 6. Published spec and generated SDKs
 
-Each external major version publishes `openapi-v1.yaml` to the docs site and to GHCR as an OCI
-artifact. From it, CI generates and publishes client SDKs — TypeScript first, since ADR-002 already
-commits to TypeScript for frontends.
+Each external major version publishes a specification to the docs site and to GHCR as an OCI artifact.
+Two things are published, and the distinction matters:
+
+- **The full `openapi-v1.yaml`** — every fragment composed together. This is the reference
+  documentation, and what a prospective integrator reads.
+- **Per-customer `openapi-v1.yaml`** — `core` plus the modules in that customer's contract, composed by
+  the ADR-010 pipeline and published alongside their deployment (ADR-012 §5). Their generated SDK
+  contains exactly the endpoints they have, and no method that would return `404`.
+
+From those, CI generates and publishes client SDKs — TypeScript first, since ADR-002 already commits to
+TypeScript for frontends.
 
 For a B2B product this is not a nicety. "Here is your typed SDK" materially shortens an operator's
 integration, and integration time is a sales consideration.
@@ -313,43 +350,37 @@ problem.
 
 ```yaml
 # in wallet-infrastructure/.github/workflows/service-ci.yml
-- name: Generate OpenAPI
-  run: ./mvnw springdoc-openapi:generate
+- name: Generate OpenAPI fragments
+  run: ./mvnw springdoc-openapi:generate     # one file per GroupedOpenApi
 
-- name: Detect breaking changes
+- name: Detect breaking changes, per fragment
   run: |
-    oasdiff breaking \
-      --base  api/openapi-v1.yaml \
-      --revision target/openapi.yaml \
-      --fail-on ERR
+    for f in api/common.v1.yaml api/core.v1.yaml api/modules/*.v1.yaml; do
+      oasdiff breaking \
+        --base     "$f" \
+        --revision "target/openapi/$(basename "$f")" \
+        --fail-on ERR
+    done
 
 - name: Fail on uncommitted spec drift
   run: |
-    cp target/openapi.yaml api/openapi-v1.yaml
-    git diff --exit-code api/openapi-v1.yaml \
-      || { echo "OpenAPI spec changed — commit the regenerated file"; exit 1; }
+    cp target/openapi/*.yaml api/ && cp target/openapi/modules/*.yaml api/modules/
+    git diff --exit-code api/ \
+      || { echo "OpenAPI fragment changed — commit the regenerated file"; exit 1; }
 ```
 
 The second step fails on breaking changes; the third fails when the committed spec is stale. Both are
 required, and neither substitutes for the other.
 
-### External API surface — still to be designed
+Running the check per fragment is what makes ADR-012's composition safe: composition only *selects*
+fragments, so a composed specification cannot contain a breaking change that no fragment contains.
 
-This ADR settles *how* the external API is versioned and specified. **What it contains is not yet
-designed** and is the largest remaining piece of product surface. The shape follows from ADRs 004 and
-009:
+### External API surface
 
-```
-POST   /v1/deposits                     initiate a top-up
-POST   /v1/withdrawals                  request a payout
-GET    /v1/accounts/{id}/balance        posted / held / available / withdrawable, per bucket
-GET    /v1/accounts/{id}/transactions   cursor-paginated history
-POST   /v1/transactions                 wager, purchase, transfer
-POST   /v1/transactions/{id}/refund     voluntary reversal
-GET    /v1/accounts/{id}/bonuses        active grants and wagering progress
-```
-
-Sketch only — tracked as its own decision.
+This ADR settles *how* the external API is versioned and specified. **What it contains is settled by
+[ADR-012](012-external-api-surface.md)** — core resources, module-gated resources, the two-phase
+transaction flow, and how composition interacts with the specification. The sketch that stood here has
+been superseded by that decision and removed rather than left to drift.
 
 ### Contract testing for N-1
 

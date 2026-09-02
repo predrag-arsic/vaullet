@@ -3,6 +3,8 @@
 ## Status
 
 **Accepted** (2026-09-01)
+**Revised** (2026-09-02) — hold lifetimes are caller-supplied (ADR-004); spec fragments are generated
+per module rather than authored (ADR-011)
 
 ## Context
 
@@ -60,15 +62,17 @@ than hidden:
 POST /v1/transactions
 Idempotency-Key: bet_9f3c1a2
 {
-  "account_id": "acct_0f9c",
-  "type":       "WAGER",
-  "amount":     "20.00",
-  "currency":   "EUR",
-  "capture":    false,            ← hold only
-  "reference":  "bet-8891",
-  "metadata":   { "market": "match-winner" }
+  "account_id":         "acct_0f9c",
+  "type":               "WAGER",
+  "amount":             "20.00",
+  "currency":           "EUR",
+  "capture":            false,          ← hold only
+  "expires_in_seconds": 259200,         ← how long the stake stays held; default 300
+  "reference":          "bet-8891",
+  "metadata":           { "market": "match-winner" }
 }
 → 201 { "transaction_id": "txn_01J8", "status": "AUTHORIZED",
+        "expires_at":  "2026-09-05T18:00:00Z",
         "allocations": [ {"bucket_type": "BONUS", "amount": "12.00"},
                          {"bucket_type": "CASH",  "amount": "8.00"} ] }
 ```
@@ -88,8 +92,16 @@ from bonus funds — it drives what they display, how they compute wagering cont
 void returns to which bucket. Hiding the bucket split would make the bonus platform, the flagship
 module, invisible to the integrator using it.
 
-Uncaptured authorizations expire on the ADR-004 reservation timeout, and the operator is told the
-deadline in `expires_at`.
+**The caller sets the deadline, because only the caller knows it.** A purchase resolves in
+milliseconds; a match-winner market resolves in three days. `expires_in_seconds` defaults to 300 and is
+bounded by the deployment's `max_hold_seconds` (`422 HOLD_TTL_TOO_LONG` beyond it) — the ADR-004
+reservation lifetime, exposed. A fixed short timeout would expire every wager in the system long before
+its event resolved, which is the failure this section exists to prevent.
+
+An authorization that reaches `expires_at` uncaptured is **released and announced**: the transaction
+moves to `EXPIRED`, the stake returns to the buckets it came from, and `transaction.expired` is
+delivered to the operator's webhook (from `ledger.hold-expired.v1`). An operator whose capture job
+failed learns it from us rather than from a customer complaint.
 
 ### 3. Core resources — present in every deployment
 
@@ -362,6 +374,13 @@ without the coupling.
 customer's spec. Fragments share components via `$ref` into `common.v1.yaml`, so `Money`, `Bucket`,
 `Problem` and `Cursor` are defined once.
 
+**The fragments are generated, not written.** ADR-011 §5 configures springdoc with one `GroupedOpenApi`
+per module, selected by controller package, so each fragment is a build output that is committed and
+diffed like any other generated spec — and `common.v1.yaml` is emitted once from the `contracts-common`
+types. Hand-authoring fragments alongside code-first generation would have produced two sources of
+truth for the same endpoints; instead the module boundary lives in the package structure, enforced by
+an architecture test.
+
 The breaking-change gate (ADR-011) runs per fragment: composition cannot introduce a breaking change
 that fragment-level checks would miss, because composition only selects.
 
@@ -386,7 +405,11 @@ POST   /v1/webhooks/subscriptions/{id}/rotate-secret
 ```
 
 Events are the ADR-007 names an operator cares about: `deposit.captured`, `withdrawal.confirmed`,
-`chargeback.received`, `rewards.value-granted`, `transaction.completed`.
+`chargeback.received`, `rewards.value-granted`, `transaction.completed`, `transaction.expired`.
+
+Webhook event names drop the `.v1` suffix carried by the internal topic: the payload version is
+negotiated per subscription (`version` on the subscription, §9 of ADR-011), so encoding it twice would
+let the two disagree.
 
 ### Sandbox
 

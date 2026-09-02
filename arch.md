@@ -268,14 +268,18 @@
 
 **Responsibilities**:
 - Atomically reserve, settle, release and expire holds
-- Record all money movement as immutable double-entry journal lines
+- Record all money movement as an immutable, append-only journal. **Single-sided**: entries are written
+  against user accounts only — there is no counterparty row and no house account in `vaullet_db`. The
+  operator's own position is reconstructed downstream in `datawarehouse_db` (ADR-004, *Scope*)
 - Maintain per-bucket balances and compute withdrawable balance
 - Provide transaction history
 
 **Database**: `vaullet_db` — PostgreSQL
 
 **REST API (Synchronous)**:
-- `POST /v1/reservations` → atomic check-and-hold (called by Transaction Service) ⭐
+- `POST /v1/reservations` → atomic check-and-hold, with a caller-supplied `expires_in_seconds`
+  (default 300, bounded by `max_hold_seconds`) ⭐
+- `GET /v1/reservations/{id}` → state, allocations, `expires_at`
 - `DELETE /v1/reservations/{id}` → release
 - `GET /v1/accounts/{id}/balance` → `{posted, held, available, withdrawable}`
 
@@ -289,6 +293,12 @@
 - `ledger.entry-recorded`
 - `ledger.balance-updated`
 - `ledger.settlement-rejected` (hold expired before settlement)
+- `ledger.hold-expired` (a reservation released without capture — a business event for long two-phase
+  holds, surfaced to the operator as `transaction.expired`)
+
+> **Event names in this document are logical names.** The Kafka topic appends the major version, per
+> ADR-007's `<domain>.<event-name>.v<major>` — `transaction.completed` here is the topic
+> `transaction.completed.v1`.
 
 ---
 
@@ -820,9 +830,10 @@ reassuring rather than disappointing:
 
 - **Modular licensing per contract** (ADR-005) is how Playtech sells IMS today — operators license
   the layers they want rather than a monolith.
-- **Holds against a double-entry ledger** (ADR-004) is exactly what Formance's programmable wallets
-  do. Arriving there independently, after finding the flaw in ADR-001, is a good sign the reasoning
-  was sound rather than novel.
+- **Holds against a journal-plus-projection ledger** (ADR-004) is exactly what Formance's programmable
+  wallets do. Arriving there independently, after finding the flaw in ADR-001, is a good sign the
+  reasoning was sound rather than novel. Formance is fully double-entry; Vaullet's journal is
+  single-sided, which is the deliberate scope difference between a wallet and a general ledger.
 
 ### Deliberately out of scope
 
@@ -891,11 +902,16 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - The lock guarded a balance *read* while the *write* happened asynchronously after release, so it
     did not prevent the overdraft it was written to prevent. Never implemented.
 
-- [ADR-002: Shared Contracts with Dual Publishing (Java + TypeScript)](docs/adr/002-shared-contracts-versioning-strategy.md) ✅
-  - **Decision**: Create `wallet-shared-contracts` repo that publishes both Maven artifact (for Java services) and NPM package (for frontends)
-  - **Strategy**: Backward compatibility by default, semantic versioning, automated TypeScript generation from Java DTOs
+- [ADR-002: Shared Contracts with Dual Publishing (Java + TypeScript)](docs/adr/002-shared-contracts-versioning-strategy.md) ✅ *(revised 2026-09-02)*
+  - **Decision**: One `wallet-shared-contracts` repo publishing **per-domain** artifact pairs —
+    `contracts-common`, `-ledger`, `-transaction`, `-payments`, `-rewards`, `-identity` — as Maven
+    artifacts and NPM packages. A service depends on the domains it speaks, so a rewards change does
+    not version the whole fleet
+  - **Two sources of truth**: REST DTOs are authored in Java (TypeScript generated); **event schemas
+    are authored as JSON Schema** and Java + TypeScript are generated from them, because ADR-007 makes
+    the registered schema the wire contract and events outlive every binding
   - **Frontend-friendly**: DTO suffix stripped (TransactionDTO → Transaction in TypeScript)
-  - **Benefits**: Single source of truth, independent service upgrades, type safety across stack
+  - **Benefits**: blast radius matches the change; wire compatibility is reviewed, not emergent
 
 - [ADR-003: Hybrid Database Strategy with Separate Analytics Database](docs/adr/003-hybrid-database-strategy-with-analytics.md) ✅
   - **Decision**: Use hybrid approach with 3 isolated databases (Vaullet, Transactions, Fraud) + 1 shared database (Support services) + dedicated Reporting database
@@ -904,10 +920,16 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Reporting**: Separate analytics database populated via Kafka events (CQRS pattern), decouples reporting from operational performance
   - **Benefits**: Critical data isolated, cost-effective, operationally balanced, room to evolve
 
-- [ADR-004: Atomic Balance Reservations in the Ledger](docs/adr/004-atomic-balance-reservations.md) ✅
+- [ADR-004: Atomic Balance Reservations in the Ledger](docs/adr/004-atomic-balance-reservations.md) ✅ *(revised 2026-09-02)*
   - **Decision**: Check-and-reserve is a single atomic Postgres transaction inside Vaullet; no distributed locks
-  - **Buckets**: money is typed per grant (`CASH`, `BONUS`, `LOYALTY`, `REFERRAL`) with its own
-    withdrawability, expiry and spend priority — so the ledger can express bonus money correctly
+  - **Buckets**: money is typed per grant (`CASH`, `BONUS`, `LOYALTY`, `REFERRAL`, `DEBT`) with its own
+    withdrawability, expiry and spend priority — so the ledger can express bonus money correctly.
+    `DEBT` is an obligation, never a funding source: excluded from allocation and carried in
+    `account_balances.debt_total` rather than `posted_balance`
+  - **Hold lifetime is the caller's**: `expires_in_seconds`, default 300, bounded by `max_hold_seconds`
+    — a wager settling in three days and a purchase settling in 300ms are the same primitive
+  - **Single-sided journal**: entries are written against user accounts only. No house account, and
+    deliberately so — a counterparty row would serialize every transaction in the deployment
   - **Backstop**: `CHECK (posted_balance - held_total >= 0)` makes an overdraft a schema violation
   - **Consequence**: Redis leaves the correctness path entirely
 
@@ -973,8 +995,10 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Two regimes**: external APIs versioned for the long term (`/v1/` path, 12-month deprecation);
     internal APIs guarantee only N-1 compatibility, which is what a rolling update needs
   - **Additive within a major, new major for breaking** — the same rule as ADR-007's event schemas
-  - **OpenAPI generated from code** (honouring ADR-002's Java-as-source-of-truth), **committed as an
-    artifact and diffed in CI**; a breaking change fails the build via `oasdiff`
+  - **OpenAPI generated from code** (honouring ADR-002's Java-as-source-of-truth), **one fragment per
+    module** via `GroupedOpenApi`, each **committed as an artifact and diffed in CI**; a breaking change
+    fails the build via `oasdiff`. Generating fragments is what lets code-first and ADR-012's composed
+    per-customer spec both be true
   - **RFC 9457 Problem Details** with a stable error-code catalogue; `trace_id` is ADR-007's `correlation_id`
   - **Cursor pagination, decimal-string money, mandatory `Idempotency-Key`** as platform-wide conventions
   - **Outbound webhooks are a versioned, signed API**, not an afterthought
@@ -987,7 +1011,9 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **`allocations` returned**, so the operator sees which buckets funded a wager; the bonus platform
     is visible to the integrator using it
   - **Absent modules mean absent endpoints** (`404`, not `501`); the OpenAPI spec is *composed* from
-    per-module fragments, so each customer's spec and SDK match their contract
+    the generated per-module fragments, so each customer's spec and SDK match their contract
+  - **The caller sets the hold lifetime** (`expires_in_seconds`); an uncaptured authorization is
+    released and announced as `transaction.expired`, never released silently
   - **`available` and `withdrawable` are separate fields** — €130 to bet, €80 to cash out
   - **`GET /v1/capabilities`** for runtime discovery across multi-brand groups
 

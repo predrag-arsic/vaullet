@@ -3,6 +3,8 @@
 ## Status
 
 **Accepted** (2026-09-01)
+**Revised** (2026-09-02) — `DEBT` is carried in `account_balances.debt_total` and excluded from
+allocation, per the corresponding ADR-004 revision
 
 ## Context
 
@@ -124,6 +126,13 @@ bucket_type IN ('CASH','BONUS','LOYALTY','REFERRAL','DEBT')
 
 A `DEBT` bucket holds a positive amount representing an obligation, and is excluded from
 `available_balance` and from `withdrawable_balance`.
+
+**Three places must agree, and ADR-004 now names all three**: the allocation query filters
+`bucket_type <> 'DEBT'`, `account_balances.posted_balance` sums fundable buckets only, and the
+obligation is carried separately in `account_balances.debt_total`. Folding debt into `posted_balance`
+would let the aggregate pre-check approve an amount the bucket allocation cannot cover — the reserve
+path would pass its own gate and then fail. Writing a chargeback shortfall therefore increments
+`debt_total`, never `posted_balance`, under the same account-row lock as every other write path.
 
 **Why not simply allow the balance to go negative:** it would require weakening
 `CHECK (posted_balance - held_total >= 0)`, and that constraint is the backstop that makes overdrafts
