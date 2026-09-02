@@ -9,7 +9,7 @@ and provisioning made conditional on deployed modules (see [ADR-005](005-module-
 
 ## Context
 
-The Vaullet walleting system uses a polyrepo microservices architecture with 15 services plus an Admin UI. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
+The Vaullet walleting system uses a polyrepo microservices architecture with 14 services plus an Admin UI. Each service needs persistent storage for its domain data. We must decide how to structure databases across services.
 
 ### Key Requirements
 
@@ -345,21 +345,28 @@ a user's money is.
 
 **Service**: Auth Service
 
-**Technology**: PostgreSQL + Redis (sessions)
+**Technology**: PostgreSQL (Keycloak + Vaullet identity schemas) + Redis (status cache)
 
 **Why isolated**: Credentials and MFA secrets warrant a separate blast radius, separate credentials,
-and a separate backup/retention policy from operational data. It is also the one database whose
-contents differ structurally between the two Auth adapters (ADR-005 Category 4).
+and a separate backup/retention policy from operational data. Since [ADR-006](006-authentication-and-identity.md)
+adopted Keycloak, this database also hosts a third-party schema with its own migration lifecycle —
+another reason not to co-locate it with services we control.
 
 ```sql
 auth_db
-├─ users
-├─ credentials        (local provider only; empty under federated identity)
-├─ mfa_configs
-├─ roles
-├─ permissions
-└─ api_clients
+
+-- Owned entirely by Keycloak; runs its own migrations. Never written to by us.
+keycloak_schema
+└─ (Keycloak-managed: users, credentials, MFA, roles, brokers, sessions)
+
+-- Vaullet's own identity tables, separate credentials
+identity_schema
+├─ accounts        (account_id ↔ keycloak_sub, status) — the ledger's anchor
+└─ api_clients     (machine clients, scopes)
 ```
+
+**No foreign key crosses the schema boundary.** `accounts.keycloak_sub` is a plain `UUID`, not a
+reference, so a Keycloak major upgrade migrating its own schema cannot break ours.
 
 Single-tenant deployment (ADR-005) means no `tenant_id`: every row in this database belongs to the
 one customer that owns the cluster.
@@ -575,7 +582,7 @@ schema.
 
 ### Alternative 1: Database Per Service (Full Separation)
 
-**Description**: Each of the 15 services gets its own dedicated database.
+**Description**: Each of the 14 services gets its own dedicated database.
 
 **Pros**:
 - Maximum isolation
@@ -992,7 +999,7 @@ in this evolution.
 
 ### Phase 1 (Current): Hybrid with PostgreSQL Reporting
 
-- 4 operational databases + Redis + Elasticsearch
+- 6 operational databases + `datawarehouse_db` + Redis + Elasticsearch
 - PostgreSQL for reporting
 - Simple Kafka consumer for ETL
 

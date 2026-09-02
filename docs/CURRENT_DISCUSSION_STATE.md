@@ -1,7 +1,8 @@
 # Current Discussion State - Vaullet Architecture
 
-**Date**: 2026-08-27
-**Next topic**: Authentication strategy (ADR-006)
+**Date**: 2026-09-02
+**Status**: ADRs 002–012 reviewed against each other and reconciled — **the ledger is ready to build**
+**Next topic**: implementation (see *Build order*); multi-currency and data retention remain deferred
 
 ---
 
@@ -26,10 +27,17 @@ The commercial model it is designed against:
 | ADR | Decision | Status |
 |-----|----------|--------|
 | 001 | Redis distributed locking for balance consistency | ⛔ Superseded by 004 |
-| 002 | Shared contracts, dual publishing (Java + TypeScript) | ✅ Accepted |
+| 002 | Shared contracts — per-domain artifacts, dual publishing (Java + TypeScript) | ✅ Accepted (revised) |
 | 003 | Hybrid database strategy with separate analytics DB | ✅ Accepted (revised) |
-| 004 | Atomic balance reservations in the ledger | ✅ Accepted |
+| 004 | Atomic balance reservations in the ledger | ✅ Accepted (revised) |
 | 005 | Module composition and deployment topology | ✅ Accepted |
+| 006 | Authentication and identity — **Keycloak** per cluster | ✅ Accepted (revised) |
+| 007 | Kafka topic naming and event schema evolution | ✅ Accepted (revised) |
+| 008 | Service-to-service authentication (NetworkPolicy + Linkerd + Keycloak) | ✅ Accepted |
+| 009 | Payment rails — deposits, withdrawals, chargebacks | ✅ Accepted (revised) |
+| 010 | Polyrepo CI/CD and GitOps delivery (GitHub Actions + Argo CD) | ✅ Accepted |
+| 011 | API versioning and OpenAPI | ✅ Accepted (revised) |
+| 012 | External API surface | ✅ Accepted (revised) |
 
 ### What ADR-004 changed
 
@@ -89,20 +97,89 @@ demonstrable to a regulator; "flag is false" requires trusting runtime state.
 
 **Boundary that matters**: `rewards_db` holds *rules* — wagering terms, tiers, campaigns. It never
 holds balances. Promotional *money* lives in `vaullet_db` buckets, reached only by emitting
-`ValueGranted`. Two services must not both believe they know what a user's money is.
+`rewards.value-granted`. Two services must not both believe they know what a user's money is.
 
 ---
 
-## Open Questions for ADR-006 (Auth)
+## What ADR-006 settled
 
-1. **Identity model** — does Vaullet own end-user identity, or does the operator federate its
-   existing users in via OIDC? ADR-005 assumes both are supported as adapters; ADR-006 has to define
-   the internal contract both satisfy.
-2. **Admin roles** — what does the operator's own staff need? Fraud reviewer, support agent, finance,
-   super-admin? Permissions model follows from this.
-3. **Service-to-service auth** — mTLS or JWT between services inside the cluster.
-4. **Session strategy** — JWT lifetime, refresh, revocation. Revocation is the hard part with JWTs and
-   interacts with the `account.locked` event from Risk Management.
+**Keycloak is deployed per cluster** as the identity provider. We do not write authentication —
+credentials, MFA, brute-force detection and OIDC conformance come audited. Auth Service shrinks to a
+thin adapter owning the account anchor, status enforcement, token-exchange orchestration and role
+mapping.
+
+Both identity models are Keycloak configuration rather than separate code paths:
+
+- `local` — users live in the Keycloak realm
+- `federated` — the operator's OIDC/SAML provider is registered as an identity **broker** in the same realm
+
+Either way Keycloak issues the same token from the same realm, so **adapter invisibility is
+structural** — there is no code path that could drift. That is a simplification over the original
+bespoke design, and the reason the switch was cheap: nothing outside the Auth boundary changed.
+
+Under federation Vaullet stores an **account anchor and nothing else**: `account_id`, issuer, subject,
+status. No email, name or KYC data — the operator keeps their PII. The anchor exists because the ledger
+is immutable for seven years and cannot key balances on a foreign, mutable subject claim.
+
+Fraud locks are enforced **locally** in both modes: Vaullet will refuse a user the operator's IdP still
+considers valid. Admin identity is **local by default**, so fraud response survives an operator IdP
+outage.
+
+This closed the last of the original four questions: user data stored (minimal, under federation),
+admin roles (six roles with separation of duties), and the auth half of operator reporting access.
+
+## The 2026-09-02 pre-implementation review
+
+The ADRs were read against *each other* rather than individually, on the theory that a set of
+individually sound decisions can still contradict. Six did, and all six are fixed:
+
+1. **Hold lifetime is now caller-supplied** (`expires_in_seconds`, default 300, bounded by
+   `max_hold_seconds`). ADR-012 sells two-phase wagers that settle hours or days later; ADR-004
+   hardcoded `now() + interval '5 minutes'`. Every wager in the flagship use case would have expired
+   before capture, and the settlement/expiry race ADR-004 calls rare would have been the normal path.
+   An expired long hold now emits `ledger.hold-expired.v1` and reaches the operator as
+   `transaction.expired` — releasing an operator's money silently is not acceptable.
+2. **`DEBT` is excluded from funding.** ADR-004's allocation query selected every bucket with a
+   positive balance, and ADR-009's `DEBT` bucket holds a *positive* amount representing what the user
+   owes — so a user could have spent their own debt. `debt_total` is now a separate column on
+   `account_balances`, `posted_balance` sums fundable buckets only, and the allocation filters
+   `bucket_type <> 'DEBT'`. All three had to move together, because the aggregate pre-check and the
+   bucket allocation must agree or the reserve path fails after passing its own gate.
+3. **The journal is single-sided, and now says so.** `arch.md` claimed double-entry; the schema has one
+   `account_id` per entry and no balanced-entry constraint. Beyond vocabulary this was a throughput
+   trap: a real counterparty side would put a house account on every transaction and serialize the
+   entire deployment on one row, against the account-first lock rule. Scope is now explicit — user
+   accounts only; the operator's position is reconstructed downstream.
+4. **Contracts publish per-domain artifacts** (`contracts-common`, `-ledger`, `-transaction`,
+   `-payments`, `-rewards`, `-identity`) from the one repository. A single jar for fourteen services
+   rebuilt, in the build graph, exactly the hub coupling ADR-005 removes at runtime.
+5. **Event schemas are authored; Java and TypeScript are generated from them.** ADR-007 makes the
+   registered JSON Schema the wire contract and argues events outlive their bindings — so the contract
+   cannot be defined *by* a binding. REST DTOs keep Java as the source of truth, where the DTO and its
+   controller ship together.
+6. **OpenAPI fragments are generated per module.** ADR-011 mandated code-first generation, ADR-012
+   mandated composed fragments, and nothing reconciled them. springdoc now emits one `GroupedOpenApi`
+   per module, selected by controller package, with the package boundary enforced by an architecture
+   test.
+
+## Build order
+
+1. `contracts-common` + `schemas/` + the generator and its CI gates — while there is still one consumer
+2. `contracts-ledger`
+3. **Vaullet**: migrations, then reserve / settle / release / expire, with ADR-001's failure trace as
+   the first test. CI inline in this repo; extract `service-ci.yml` when a second service exists
+4. Transaction Service, and the `core.v1.yaml` fragment behind it
+
+## Still open
+
+- **Human/operational access control** — `kubectl exec`, database credentials, break-glass. Explicitly
+  out of ADR-008's scope; needs its own decision.
+- **Warehouse rebuild vs. retention** — ADR-007 resolved this by making money-topic retention
+  indefinite (tiered storage), because ADR-003's 2-hour rebuild objective is false under a 7-day
+  window. The cost is per customer cluster and has not been sized.
+- **Operator reporting surface** — dashboard vs API vs embeddable widgets. A product question, not an
+  auth one. The auth half is settled (Admin UI is role-scoped; BI reads `datawarehouse_db` via
+  read-only credentials).
 
 ---
 
@@ -113,7 +190,7 @@ holds balances. Promotional *money* lives in `vaullet_db` buckets, reached only 
   (modular monolith) is the documented candidate for a low-cost tier.
 - **Elasticsearch is core by inheritance** — Fraud Detection is core and ADR-003 gives it ES. Worth
   revisiting whether pattern search can degrade to Postgres-only.
-- **15 services is a lot for a solo project.** The module boundaries have commercial justification, but
+- **14 services is a lot for a solo project.** The module boundaries have commercial justification, but
   "sellable unit" and "separately deployed service" are not the same thing.
 
 ---
@@ -121,6 +198,6 @@ holds balances. Promotional *money* lives in `vaullet_db` buckets, reached only 
 ## Files
 
 - Architecture overview: `/arch.md`
-- ADRs: `/docs/adr/00{1..5}-*.md`
+- ADRs: `/docs/adr/0{01..12}-*.md` (index and review summary: `/docs/adr/README.md`)
 - Database grouping: `/docs/database-grouping-strategy.md`
 - Shared contracts example: `/docs/shared-contracts-example.md`

@@ -33,6 +33,16 @@ Don't write an ADR for:
 - 🧪 Experimental spikes (use spike reports)
 - 📚 How-to guides (use documentation)
 
+> **A note on the examples below.** They are drawn from
+> [ADR-001](001-distributed-locking-for-balance-consistency.md), which is **superseded and was wrong**:
+> its Redis lock guarded a balance read while the write happened asynchronously after the lock was
+> released, so it never prevented the overdraft it was written to prevent. It is quoted here purely as
+> an illustration of ADR *format* — decisive language, explicit trade-offs, honest alternatives.
+>
+> That it reads so convincingly while being incorrect is itself the lesson: a well-written ADR is not a
+> correct one. See [ADR-004](004-atomic-balance-reservations.md) for the correction, and note that the
+> format did its job — the reasoning was written down plainly enough to be checked and found wrong.
+
 ## Writing Guidelines
 
 ### 1. Title

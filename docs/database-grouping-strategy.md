@@ -4,7 +4,7 @@
 
 **Decision**: Database-per-domain with strategic grouping to balance isolation with operational overhead.
 
-**Services**: 15 backend services + Admin UI
+**Services**: 14 backend services + Admin UI
 **Databases**: 6 operational PostgreSQL + 1 analytics PostgreSQL + Redis Cluster + Elasticsearch
 = **9 infrastructure components** in a full deployment
 
