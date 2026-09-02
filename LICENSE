@@ -1,21 +1,26 @@
-MIT License
+Copyright (c) 2026 Predrag Arsić. All rights reserved.
 
-Copyright (c) 2026 Predrag Arsić
+This repository and everything in it — the architecture documentation, the
+architecture decision records, the diagrams, the schemas and the accompanying
+text — is published for reading and evaluation only.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+No licence is granted. In particular, and without limiting the generality of
+the above, no permission is given to copy, reproduce, modify, adapt, translate,
+publish, distribute, sublicense, sell, or create derivative works from this
+material, in whole or in part, or to use it for any commercial purpose,
+including as documentation, specification or design input for any product or
+service.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+Viewing and forking within GitHub, to the extent required by the GitHub Terms
+of Service, are not affected by the above.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+PERMITTED WITHOUT REQUEST: brief quotation for the purpose of review, comment,
+teaching, or scholarship, with attribution to this repository. This is a narrow
+grant and does not extend to reproducing a document, or a substantial part of
+one, in another work.
+
+For any other use, ask: predrag87arsic@gmail.com
+
+THE MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED. THE AUTHOR SHALL NOT BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY ARISING FROM OR IN CONNECTION WITH THE MATERIAL OR ITS USE.
