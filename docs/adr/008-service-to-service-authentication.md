@@ -2,22 +2,19 @@
 
 ## Status
 
-**Partially Accepted** (2026-08-31)
+**Accepted** (2026-09-01)
 
-| Layer | Status |
+Layers 1–3 as described below are adopted in full. **Alternative 6** (mesh-free: NetworkPolicy + CNI
+encryption + Keycloak tokens on every call) was evaluated as a unit on 2026-09-01 and rejected — see
+its entry for the reasoning, which reverses the initial lean.
+
+| Layer | Decision |
 |---|---|
-| **Layer 1** — NetworkPolicy, default-deny | ✅ **Accepted** — uncontested baseline |
-| **Layer 2** — Linkerd mTLS | ⏸️ **Under review** — see Alternative 6 |
-| **Layer 3** — Keycloak service tokens, money path only | ⏸️ **Under review** — scope may widen to all calls |
-| **Kafka** — SASL/OAUTHBEARER + ACLs | ✅ **Accepted** — independent of the layer choice |
-| **User context** — service identity + explicit `account_id` | ✅ **Accepted** — independent of the layer choice |
-
-**Open question**: whether to adopt a service mesh at all. Alternatives 4 and 5 were written up and
-rejected *separately*; **combined** they form a coherent mesh-free design that was never evaluated as a
-unit, and that combination is now under active consideration — see **Alternative 6**.
-
-Settled either way: NetworkPolicy as a baseline, Kafka authentication, and how Vaullet learns which
-user a reservation is for. None of those depend on the mesh decision.
+| **Layer 1** — NetworkPolicy, default-deny | ✅ Adopted |
+| **Layer 2** — Linkerd mTLS | ✅ Adopted |
+| **Layer 3** — Keycloak service tokens, money path only | ✅ Adopted, scope unchanged |
+| **Kafka** — SASL/OAUTHBEARER + ACLs | ✅ Adopted |
+| **User context** — service identity + explicit `account_id` | ✅ Adopted |
 
 Closes the item [ADR-006](006-authentication-and-identity.md) explicitly deferred: that ADR settled
 *user* identity and assumed services inside a cluster were mutually authenticated, without saying how.
@@ -325,62 +322,61 @@ dependency of *all* internal traffic rather than three endpoints.
 **Why rejected**: Tokens authorize; they do not protect the wire. Without mTLS the tokens themselves
 are interceptable, which undermines the mechanism doing the work.
 
-### Alternative 6: NetworkPolicy + Keycloak tokens everywhere, no mesh (Alternatives 4 + 5 combined) — **UNDER ACTIVE CONSIDERATION**
+### Alternative 6: NetworkPolicy + Keycloak tokens everywhere, no mesh (Alternatives 4 + 5 combined) — **EVALUATED AND REJECTED (2026-09-01)**
 
 **Description**: Drop the mesh. Layer 1 for reachability, Keycloak client-credentials tokens on
-*every* inter-service call for identity and authorization, and encryption solved at the CNI layer
-rather than by sidecars.
+*every* inter-service call for identity and authorization, and encryption at the CNI layer rather than
+by sidecars.
 
-Alternatives 4 and 5 were each rejected above for a gap the other one fills. Alternative 4 has no
-identity or authorization; Alternative 5 supplies both. Alternative 5 has no encryption; that is the
-remaining gap, and it does not require a mesh to close:
-
-**CNI-level transparent encryption.** Cilium (or Calico) can encrypt all pod-to-pod traffic with
-WireGuard or IPsec at the datapath, with no sidecars and near-zero configuration. If the cluster
-already runs Cilium as its CNI — common — this is a flag, not a component.
-
-That reframes the rejection of Alternative 5 above. It was rejected because "tokens authorize, they do
-not protect the wire." With WireGuard at the CNI, the wire is protected by something else, and the
-objection no longer holds.
+Alternatives 4 and 5 were each rejected above for a gap the other one fills: 4 has no identity or
+authorization, which 5 supplies; 5 has no encryption, which **CNI-level transparent encryption**
+(Cilium or Calico with WireGuard) supplies without any sidecar. That combination was never evaluated
+as a unit, and it deserved to be.
 
 **Pros**:
-- **No sidecars at all** — the lowest per-cluster footprint of any option, which matters most given the
-  ADR-005 cost floor. Better on this axis than Linkerd, not merely competitive.
-- **One identity mechanism** for users, services and Kafka principals. Keycloak already issues all
-  three; there is no second identity system to reason about.
-- **No mesh to operate**, upgrade, or debug — and no trust anchor whose expiry takes the cluster down,
-  which is the sharpest operational risk in the current Layer 2.
-- **Authorization is explicit in application code**, so it is unit-testable rather than asserted in
-  cluster YAML.
-- **Failures are legible.** A 403 with a scope name beats an opaque mesh connection reset.
+- **No sidecars** — the smallest per-cluster footprint of any option
+- **One identity mechanism** for users, services and Kafka principals; no second system to reason about
+- **No mesh to operate or upgrade**, and no trust anchor whose expiry takes a cluster down
+- **Authorization is explicit in application code**, so it is unit-testable rather than cluster YAML
+- **Legible failures** — a 403 naming a scope beats an opaque connection reset
 
 **Cons**:
-- **Token plumbing in all fourteen services.** Largely Spring Boot configuration, but it is real work
-  and a new failure mode in every service rather than one.
-- **Keycloak becomes a dependency of all internal traffic**, not three endpoints. Token and JWKS
-  caching make an outage degrade rather than break, but the exposure is much wider.
-- **Service identity becomes a bearer secret, not a cryptographic proof.** A leaked client secret
-  impersonates a service until rotation; a mesh identity cannot be copied out of a config map.
-- **Loses the mesh's free observability** — golden metrics and per-hop tracing would need building.
-- **Tokens are replayable within their lifetime** if ever intercepted, where mTLS binds identity to the
-  connection.
-- **CNI encryption is node-to-node**, not workload-to-workload. Traffic between two pods on the *same*
-  node may not traverse the encrypted path, depending on configuration.
+- **Token plumbing in all fourteen services**, permanently
+- **Keycloak becomes a dependency of all internal traffic** rather than three endpoints
+- **Service identity becomes a bearer secret** — a leaked client secret impersonates a service until rotation
+- **Loses the mesh's observability** — golden metrics and per-hop tracing would need building
+- **CNI encryption is node-to-node**, so two pods on the same node may not traverse the encrypted path
 
-**What to evaluate before deciding**:
-1. Which CNI the target clusters run, and whether WireGuard encryption is available and supported there
-2. Measured cost of token plumbing across services — likely a shared library, so a one-off
-3. Whether losing cryptographic workload identity is acceptable given single-tenant isolation
-4. What replaces the mesh's observability, and what that costs
+**Why rejected — three reasons, in order of weight:**
 
-**Why it is not yet decided**: it is genuinely competitive with the layered design and better on
-per-customer cost, which is the constraint that has driven several decisions in this repository. The
-trade is cryptographic workload identity and free observability against a smaller, simpler runtime. It
-deserves a real evaluation rather than a paragraph.
+**1. The footprint argument was weaker than it first appeared.** Linkerd is roughly 300–600 MB per
+cluster. That is a real cost, but it sits beside Elasticsearch, Kafka, Keycloak, Argo CD (ADR-010) and
+five to seven PostgreSQL databases. It is a small fraction of a cluster that already exists, and the
+initial framing of this alternative overstated the saving by treating footprint as the deciding axis.
+The Istio-versus-Linkerd comparison earlier in this ADR turns on a 1.5–3 GB difference and remains
+sound; Linkerd-versus-nothing is a much smaller delta and does not carry the same weight.
+
+**2. Mesh identity cannot be forgotten; token plumbing can.** Layer 2 applies to every service
+uniformly, including ones written next year by someone who has not read this ADR. Alternative 6 makes
+correct behaviour a property of each service's code — fourteen places to get right, and a permanent
+surface where a new service can be written without the check and still work in every test. The ADR-010
+CI gate "every `Deployment` is meshed" is a mechanically checkable fact; "every service correctly
+obtains and validates a token on every outbound call" is not, and the difference between an invariant
+the platform enforces and one each team must remember is the kind of thing this architecture has
+repeatedly chosen to make structural.
+
+**3. Its encryption story depends on an assumption we cannot verify.** CNI-level WireGuard is nearly
+free *if the cluster already runs Cilium*. If it does not, adopting Alternative 6 means replacing the
+CNI in every customer cluster — a far larger and riskier change than installing Linkerd. Making the
+security posture contingent on someone else's platform choice is a poor trade when the alternative is
+self-contained.
+
+**What would flip this**: per-cluster resource cost becoming genuinely binding, *and* Cilium confirmed
+across target clusters, *and* an accepted answer for the observability gap. Failing any one of those,
+Layer 2 stands. Istio ambient mode, which removes sidecars while keeping mesh identity, is the more
+likely future revision than going mesh-free.
 
 ## Implementation Notes
-
-> **Note**: the Linkerd notes below apply only if Layer 2 is confirmed. See Alternative 6.
 
 ### Linkerd
 
@@ -444,6 +440,6 @@ separately.
 
 ---
 
-**Date**: 2026-08-31
+**Date**: 2026-09-01
 **Author**: Predrag
 **Reviewers**: TBD

@@ -936,7 +936,7 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Keyed by `account_id`** so a grant always lands before the spend that draws on it
   - **Money topics retained indefinitely** (tiered) — ADR-003's warehouse rebuild depends on it
 
-- [ADR-008: Service-to-Service Authentication](docs/adr/008-service-to-service-authentication.md) 🟡 **Partially adopted**
+- [ADR-008: Service-to-Service Authentication](docs/adr/008-service-to-service-authentication.md) ✅
   - **Three layers**, because transport identity, authorization and user context are different questions
   - **NetworkPolicy default-deny** → **Linkerd mTLS** on all internal traffic → **Keycloak service
     tokens on the money path only** (reserve, adjustments, account freeze)
@@ -944,8 +944,10 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Kafka**: SASL/OAUTHBEARER against the same Keycloak, with ACLs generated from the deployed module set
   - **User context**: service identity plus explicit `account_id`; forwarding user tokens to the ledger
     was rejected, since a stolen token would bypass fraud, limits and the transaction record
-  - **Open**: whether to run a mesh at all. A mesh-free combination (CNI-level WireGuard encryption +
-    Keycloak tokens on every call) is under active consideration — Alternative 6
+  - **Mesh-free was evaluated and rejected** (Alternative 6): the footprint saving is small beside a
+    cluster already running Kafka, Elasticsearch, Keycloak and Argo CD, mesh identity cannot be
+    forgotten the way per-service token plumbing can, and CNI encryption would depend on every
+    customer cluster running Cilium
 
 - [ADR-009: Payment Rails — Deposits, Withdrawals and Chargebacks](docs/adr/009-payment-rails-deposits-and-withdrawals.md) ✅
   - **Deposits and withdrawals are transaction types** in Transaction Service — one money path, not a
@@ -977,12 +979,23 @@ Key architectural decisions are documented as **Architecture Decision Records (A
   - **Cursor pagination, decimal-string money, mandatory `Idempotency-Key`** as platform-wide conventions
   - **Outbound webhooks are a versioned, signed API**, not an afterthought
 
+- [ADR-012: External API Surface](docs/adr/012-external-api-surface.md) ✅
+  - **Resources follow the integrator, not our services** — `/v1/deposits`, `/v1/withdrawals` and
+    `/v1/transactions` are separate despite sharing Transaction Service internally
+  - **Two-phase transactions exposed** (`capture: false` → `/capture` or `/void`) — the ADR-004
+    reservation model is exactly what a pending bet needs
+  - **`allocations` returned**, so the operator sees which buckets funded a wager; the bonus platform
+    is visible to the integrator using it
+  - **Absent modules mean absent endpoints** (`404`, not `501`); the OpenAPI spec is *composed* from
+    per-module fragments, so each customer's spec and SDK match their contract
+  - **`available` and `withdrawable` are separate fields** — €130 to bet, €80 to cash out
+  - **`GET /v1/capabilities`** for runtime discovery across multi-brand groups
+
 See [docs/adr/README.md](docs/adr/README.md) for the complete list of ADRs and how to contribute new ones.
 
 ## Next Steps
 
-1. Define detailed API contracts — **versioning and spec format done** (ADR-011); the external API's
-   *contents* remain to be designed
+1. ~~Define detailed API contracts (OpenAPI/Swagger)~~ ✅ **Done** - See ADR-011 (versioning/spec) and ADR-012 (surface)
 2. ~~Design database schemas per service~~ ✅ **Done** - See ADR-003
 3. ~~Define Kafka topic naming conventions~~ ✅ **Done** - See ADR-007
 4. ~~Set up shared contracts repository~~ ✅ **Done** - See ADR-002

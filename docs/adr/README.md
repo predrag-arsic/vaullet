@@ -45,20 +45,19 @@ ADRs document important architectural decisions made during the development of t
 | [005](005-module-composition-and-deployment-topology.md) | Module Composition and Deployment Topology | ✅ Accepted | 2026-08-27 |
 | [006](006-authentication-and-identity.md) | Authentication and Identity | ✅ Accepted | 2026-08-31 |
 | [007](007-kafka-topics-and-event-schema-evolution.md) | Kafka Topic Naming and Event Schema Evolution | ✅ Accepted | 2026-08-27 |
-| [008](008-service-to-service-authentication.md) | Service-to-Service Authentication | 🟡 Partially Accepted — mesh vs mesh-free under review | 2026-08-31 |
+| [008](008-service-to-service-authentication.md) | Service-to-Service Authentication | ✅ Accepted | 2026-09-01 |
 | [009](009-payment-rails-deposits-and-withdrawals.md) | Payment Rails — Deposits, Withdrawals and Chargebacks | ✅ Accepted | 2026-09-01 |
 | [010](010-polyrepo-cicd-and-gitops-delivery.md) | Polyrepo CI/CD and GitOps Delivery | ✅ Accepted | 2026-09-01 |
 | [011](011-api-versioning-and-openapi.md) | API Versioning and OpenAPI | ✅ Accepted | 2026-09-01 |
+| [012](012-external-api-surface.md) | External API Surface | ✅ Accepted | 2026-09-01 |
 
 ## Upcoming Decisions
 
 Track decisions that need to be made:
 
 - [ ] Database schema design for Vaullet (append-only ledger)
-- [ ] **External API surface design** — ADR-011 settles versioning and specification; *what* the operator-facing API contains is not yet designed
 - [ ] **Manual ledger adjustments** (corrections, goodwill credits, dispute resolution) — the need exists, the endpoint does not; surfaced in the 2026-09-01 review
 - [ ] Multi-currency within a single deployment (currently one currency per deployment — ADR-004)
-- [ ] **ADR-008 Layer 2/3**: mesh (Linkerd) vs mesh-free (CNI encryption + Keycloak tokens everywhere) — Alternative 6
 - [ ] PSP settlement matching (provider reports vs captured deposits)
 - [ ] Data retention and archival policy
 - [ ] Human/operational access control (kubectl, database credentials, break-glass)
