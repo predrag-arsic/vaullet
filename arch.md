@@ -590,6 +590,69 @@ queries an operational database — that is the whole point of the separation (A
 
 ## Communication Patterns
 
+### The dependency rule, drawn
+
+```mermaid
+flowchart TD
+    OP([Operator backend]):::ext
+
+    subgraph CORE["CORE — always deployed, synchronous"]
+        direction LR
+        TX["Transaction Service<br/><i>orchestrator</i>"]
+        AUTH["Auth Service"]
+        FRAUD["Fraud Detection"]
+        LIM["Limits"]
+        LEDGER[("Vaullet — the ledger<br/><b>check-and-reserve</b>")]
+    end
+
+    KAFKA{{"Kafka"}}:::infra
+
+    subgraph SELLABLE["SELLABLE — any subset, event-driven only"]
+        direction LR
+        BONUS["Bonus ⭐"]
+        LOY["Loyalty"]
+        REF["Referral"]
+        SUB["Subscription"]
+        RISK["Risk Management"]
+        NOTIF["Notification"]
+        ETL["Reporting ETL"]
+    end
+
+    AUDIT["Audit<br/><i>event-driven but CORE —<br/>a licence condition, not a feature</i>"]:::override
+
+    OP -->|REST| TX
+    TX -->|validate token| AUTH
+    TX -->|risk score| FRAUD
+    TX -->|limit check| LIM
+    TX ==>|"POST /v1/reservations"| LEDGER
+
+    TX -.->|transaction.*.v1| KAFKA
+    LEDGER -.->|ledger.*.v1| KAFKA
+    KAFKA -.-> BONUS & LOY & REF & SUB & RISK & NOTIF & ETL & AUDIT
+    BONUS -.->|rewards.value-granted.v1| KAFKA
+    LOY -.-> KAFKA
+    REF -.-> KAFKA
+    KAFKA -.-> LEDGER
+
+    classDef ext fill:none,stroke-dasharray:4 3
+    classDef infra fill:none
+    classDef override stroke-width:3px
+```
+
+**Every solid line is synchronous, and every solid line ends in a core component.** That is the whole
+of ADR-005's rule, drawn: *a synchronous dependency makes a component core; optional functionality
+communicates only through events.* Nothing in the SELLABLE box is reachable by a solid line, which is
+why any of its 2⁷ = 128 subsets is a valid deployment — a consumer group that is not deployed costs
+nothing, and no caller ever gets a connection error for a module the customer did not buy.
+
+The double line is the one that decides money: `POST /v1/reservations` is where the balance invariant
+is enforced, atomically, before the transaction is allowed to proceed (ADR-004).
+
+Audit is drawn outside both boxes on purpose. It is event-driven, so the rule says it could be
+optional — but a deployment without an audit trail is not licensable, so it is core for regulatory
+reasons rather than architectural ones. It is the single deliberate exception, recorded here so it is
+not rediscovered during a certification review.
+
 ### Synchronous (REST) - Pre-transaction Validation
 ```
 User Request
@@ -860,6 +923,29 @@ A contract determines which modules that customer's cluster runs. Modules a cust
 
 The same per-customer values file also carries **currency** (operator-supplied, one per deployment,
 immutable after provisioning) and the **Auth adapter** (local identity vs. federated OIDC).
+
+```mermaid
+flowchart LR
+    subgraph A["Customer A — full contract"]
+        direction TB
+        A1["CORE: Transaction · Vaullet · Auth<br/>Fraud · Limits · Audit · Admin UI"]
+        A2["INFRA: Kafka · Redis · Postgres<br/>Elasticsearch · Keycloak · Scheduler · Argo CD"]
+        A3["MODULES: Bonus ⭐ · Loyalty · Referral<br/>Subscription · Risk · Notification · Reporting ETL"]
+        A4[("7 databases<br/>+ datawarehouse_db")]
+    end
+    subgraph B["Customer B — core + Bonus"]
+        direction TB
+        B1["CORE: Transaction · Vaullet · Auth<br/>Fraud · Limits · Audit · Admin UI"]
+        B2["INFRA: Kafka · Redis · Postgres<br/>Elasticsearch · Keycloak · Scheduler · Argo CD"]
+        B3["MODULES: Bonus ⭐"]
+        B4[("6 databases<br/>no datawarehouse_db")]
+    end
+```
+
+Customer B is not Customer A with features switched off. The pods, the schemas, the Kafka topics and
+the consumer groups for everything they did not buy **do not exist** — enablement is build-time, per
+customer Helm values, not a runtime flag. "Not installed" is demonstrable to a regulator; "flag is
+false" requires trusting runtime state.
 
 ```
 Customer A (full)                    Customer B (core + Bonus only)

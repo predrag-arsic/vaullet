@@ -46,6 +46,38 @@ Account holds $100. Two withdrawals of $60, arriving 50ms apart — not even con
 | ~200ms | Vaullet consumes A | | balance $40 |
 | ~250ms | | Vaullet consumes B | balance **-$20** |
 
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Withdrawal A
+    participant B as Withdrawal B
+    participant L as Redis lock
+    participant K as Kafka
+    participant V as Vaullet (ledger)
+
+    Note over A,V: ADR-001 — the lock serializes the read, nothing serializes the write
+    A->>L: acquire lock(account)
+    A->>V: GET balance
+    V-->>A: 100.00
+    Note right of A: 100 >= 60 → approve
+    A->>K: publish transaction.created
+    A->>L: release lock
+    Note over L: 50ms later — the lock is free,<br/>but the balance has not moved yet
+    B->>L: acquire lock(account)
+    B->>V: GET balance
+    V-->>B: 100.00
+    Note right of B: 100 >= 60 → approve
+    B->>K: publish transaction.created
+    K-->>V: consume A
+    Note over V: balance 40.00
+    K-->>V: consume B
+    Note over V: balance -20.00 — overdraft
+```
+
+The lock is released at step 6 and the balance does not change until step 13. Every approval decision
+in that window reads stale state, and the window is a Kafka round-trip wide — orders of magnitude
+longer than the lock was ever held.
+
 This is the exact scenario in ADR-001's opening paragraph. Any lock hold time shorter than the Kafka round-trip leaves the window open, and the whole point of a short lock TTL was to keep hold times low — the mitigation and the bug pull in the same direction.
 
 Two secondary problems in ADR-001, noted for completeness:
@@ -193,6 +225,69 @@ CREATE TABLE reservation_allocations (
 );
 ```
 
+```mermaid
+erDiagram
+    ACCOUNT_BALANCES ||--o{ BALANCE_BUCKETS : "aggregates"
+    ACCOUNT_BALANCES ||--o{ RESERVATIONS : "serializes on"
+    BALANCE_BUCKETS  ||--o{ LEDGER_ENTRIES : "journalled in"
+    BALANCE_BUCKETS  ||--o{ RESERVATION_ALLOCATIONS : "funds"
+    RESERVATIONS     ||--|{ RESERVATION_ALLOCATIONS : "draws from"
+    RESERVATIONS     ||--o{ LEDGER_ENTRIES : "settles into"
+
+    ACCOUNT_BALANCES {
+        uuid    account_id     PK "the concurrency anchor — locked FIRST, always"
+        numeric posted_balance "sum over FUNDABLE buckets"
+        numeric held_total
+        numeric debt_total     "DEBT buckets, never spendable"
+        check   overdraft      "posted_balance - held_total >= 0"
+    }
+    BALANCE_BUCKETS {
+        uuid    bucket_id      PK
+        uuid    account_id     FK
+        text    bucket_type    "CASH BONUS LOYALTY REFERRAL DEBT"
+        uuid    grant_id       UK "idempotency for the granting event"
+        numeric posted_balance
+        numeric held_total
+        bool    withdrawable
+        numeric wagering_remaining
+        int     spend_priority "lower spends first"
+        ts      expires_at
+        check   overdraft      "posted_balance - held_total >= 0"
+    }
+    LEDGER_ENTRIES {
+        uuid    entry_id       PK "immutable — append only, never updated"
+        uuid    account_id
+        uuid    bucket_id      FK
+        text    direction      "DEBIT or CREDIT"
+        numeric amount         "CHECK amount > 0"
+        uuid    reservation_id FK
+        uuid    transaction_id UK "unique with bucket_id + direction"
+        ts      created_at
+    }
+    RESERVATIONS {
+        uuid    reservation_id  PK
+        uuid    account_id
+        numeric amount
+        text    state           "HELD SETTLED RELEASED EXPIRED"
+        text    idempotency_key UK "a retry returns the existing hold"
+        ts      expires_at      "caller-supplied lifetime"
+        ts      created_at
+    }
+    RESERVATION_ALLOCATIONS {
+        uuid    reservation_id PK
+        uuid    bucket_id      PK
+        numeric amount         "how much this hold takes from this bucket"
+    }
+    LEDGER_CONFIG {
+        bool singleton    PK "one row, written at provisioning, never updated"
+        char currency        "ISO 4217 — a constant cannot be forgotten"
+        int  minor_units     "2 for EUR, 0 for JPY, 3 for KWD"
+    }
+```
+
+`LEDGER_CONFIG` stands alone deliberately: currency is a deployment constant, not a column on every
+row.
+
 The two `CHECK (posted_balance - held_total >= 0)` constraints are the backstop, at both aggregate and bucket level: even with wrong application logic, Postgres refuses to record an overdraft. ADR-001 had no equivalent — nothing in its schema could have caught the bug.
 
 `withdrawable_balance` is `SUM(posted_balance - held_total) WHERE withdrawable`, computed on read. It is deliberately not stored: it is a question, not a fact. A `DEBT` bucket is never `withdrawable`, so it is excluded here by construction.
@@ -254,6 +349,37 @@ UPDATE account_balances SET held_total = held_total + $amount, updated_at = now(
  WHERE account_id = $1;
 
 COMMIT;
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TX as Transaction Service
+    participant V as Vaullet (ledger)
+    participant PG as Postgres
+
+    TX->>V: POST /v1/reservations<br/>Idempotency-Key, amount, currency, expires_in_seconds
+    activate V
+    V->>PG: BEGIN
+    V->>PG: SELECT account_balances WHERE account_id FOR UPDATE
+    Note over PG: the ONLY lock taken.<br/>Serializes this account — other accounts never contend
+    PG-->>V: posted_balance, held_total
+    alt available < amount
+        V->>PG: ROLLBACK
+        V-->>TX: 409 INSUFFICIENT_FUNDS
+    else available >= amount
+        V->>PG: SELECT buckets WHERE type != DEBT AND not expired<br/>ORDER BY spend_priority
+        V->>PG: INSERT reservations + reservation_allocations
+        V->>PG: UPDATE held_total on buckets and on the account
+        V->>PG: COMMIT
+        Note over PG: CHECK (posted - held >= 0) holds at both levels.<br/>An overdraft is a schema violation, not a lost race
+        V-->>TX: 201 reservation_id, allocations, expires_at
+    end
+    deactivate V
+
+    Note over TX,PG: later — settle or release, same account-first lock order
+    TX->>V: transaction.completed.v1 (Kafka)
+    V->>PG: lock account, write ledger_entries, decrement held, mark SETTLED
 ```
 
 Read and write are in the same transaction, on the same rows, in the same service. There is no window.
